@@ -1,0 +1,63 @@
+# CV Privacy Platform Requirements
+# Fixed with compatible versions
+
+# Core FastAPI Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Authentication & Security
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-jose[cryptography]==3.3.0
+cryptography>=41.0.0,<46.0.0
+passlib[bcrypt]==1.7.4
+
+# Database
+sqlalchemy==2.0.23
+alembic==1.13.1
+
+# PostgreSQL support (production)
+psycopg2-binary==2.9.9
+
+# Redis support (optional but recommended)
+redis>=4.5.0,<6.0.0
+
+# HTTP client for OAuth and API calls
+aiohttp==3.9.1
+httpx==0.25.2
+
+# Rate limiting
+slowapi==0.1.9
+
+# AI Services - Compatible versions
+openai>=1.0.0,<2.0.0
+anthropic>=0.7.0,<1.0.0
+
+# File processing
+python-multipart==0.0.6
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Date/time handling
+python-dateutil==2.8.2
+
+# JSON Web Tokens
+PyJWT==2.8.0
+
+# Email validation
+email-validator==2.1.0
+
+# Production server
+gunicorn==21.2.0
+
+# Development dependencies (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+
+# Optional: Document processing
+# python-docx>=0.8.11
+# PyPDF2>=3.0.0
+
+# Optional: QR code generation
+# qrcode[pil]>=7.4.0
