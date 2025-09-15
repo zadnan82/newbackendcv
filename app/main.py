@@ -27,6 +27,7 @@ from app.api import resume, cloud, ai_enhance, cover_letter
 from app.auth.sessions import get_current_session, create_anonymous_session
 from app.schemas import ErrorResponse
 
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -116,16 +117,64 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
+
+@app.post("/api/session", tags=["Health & Analytics"])
+@limiter.limit("20/minute")  # Increased from 10/minute to 20/minute for development
+async def create_session(request: Request):
+    """Create anonymous session"""
+    try:
+        from .auth.sessions import create_anonymous_session
+
+        session_data = await create_anonymous_session(request)
+
+        return {
+            "session_id": session_data["session_id"],
+            "token": session_data["token"],
+            "expires_at": session_data["expires_at"],
+            "message": "Anonymous session created successfully",
+        }
+    except Exception as e:
+        logger.error(f"Session creation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create session")
+
+
 # CORS middleware
 # In app/main.py, update the CORS middleware:
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Temporarily allow all origins for testing
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "*",
+    ],  # Allow all for development
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+# Add this debug middleware (add after CORS middleware)
+@app.middleware("http")
+async def debug_requests(request: Request, call_next):
+    """Debug middleware to log requests in development"""
+    if settings.debug:
+        print(f"🔍 {request.method} {request.url}")
+        print(f"🔍 Headers: {dict(request.headers)}")
+
+        # Read body for POST requests
+        if request.method == "POST":
+            body = await request.body()
+            if body:
+                print(f"🔍 Body: {body.decode()}")
+
+    response = await call_next(request)
+
+    if settings.debug:
+        print(f"🔍 Response: {response.status_code}")
+
+    return response
+
 
 # Trusted hosts middleware (production security)
 if not settings.debug:
