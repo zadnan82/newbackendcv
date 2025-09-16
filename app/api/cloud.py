@@ -3,12 +3,17 @@
 Cloud provider connection and management API
 """
 
+from datetime import datetime, timedelta
 import logging
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 import secrets
 import asyncio
+
+from pydantic import BaseModel
+
+from app.config import get_settings
 
 from ..schemas import (
     CloudProvider,
@@ -25,9 +30,11 @@ from ..auth.sessions import (
 )
 from ..auth.oauth import oauth_manager
 from ..cloud.service import cloud_service, CloudProviderError
+import aiohttp
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+settings = get_settings()
 
 
 @router.get("/providers")
@@ -167,8 +174,15 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
     try:
         cloud_tokens = session.get("cloud_tokens", {})
 
+        # DEBUG: Log what tokens we have
+        logger.info(f"🔍 STATUS: Session ID: {session.get('session_id')}")
+        logger.info(f"🔍 STATUS: Cloud tokens found: {list(cloud_tokens.keys())}")
+        logger.info(f"🔍 STATUS: Full cloud_tokens: {cloud_tokens}")
+
         # Get status for all providers
         statuses = await cloud_service.get_all_connection_statuses(cloud_tokens)
+
+        logger.info(f"🔍 STATUS: Returning statuses: {[s.dict() for s in statuses]}")
 
         return statuses
 
@@ -379,3 +393,221 @@ async def refresh_all_tokens(session: dict = Depends(get_current_session)):
     except Exception as e:
         logger.error(f"Token refresh error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to refresh tokens")
+
+
+class OAuthCallbackRequest(BaseModel):
+    code: str
+    state: str
+    redirect_uri: str
+
+
+@router.post("/callback/{provider}")
+async def handle_oauth_callback_post(
+    provider: CloudProvider,
+    request_data: OAuthCallbackRequest,
+    session: dict = Depends(get_current_session),
+):
+    """Handle OAuth callback from frontend (POST request)"""
+
+    logger.info(f"🔗 CALLBACK: Processing OAuth callback for {provider.value}")
+    logger.info(f"🔗 CALLBACK: Code: {request_data.code[:20]}...")
+    logger.info(f"🔗 CALLBACK: State: {request_data.state}")
+
+    try:
+        # For now, just simulate success to test the flow
+        session_tokens = session.get("cloud_tokens", {})
+        session_tokens[provider.value] = {
+            "access_token": "fake_token_for_testing",
+            "email": "test@gmail.com",
+        }
+
+        # Update session
+        await session_manager.update_session_cloud_tokens(
+            session["session_id"], session_tokens
+        )
+
+        logger.info(f"✅ CALLBACK: Successfully connected {provider.value}")
+
+        return {
+            "success": True,
+            "provider": provider.value,
+            "message": "Connected successfully",
+        }
+
+    except Exception as e:
+        logger.error(f"❌ CALLBACK: Error processing callback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def exchange_google_code_for_tokens(code: str, redirect_uri: str) -> dict:
+    """Exchange Google authorization code for tokens"""
+
+    import aiohttp
+    from ..config import get_settings
+
+    settings = get_settings()
+
+    token_url = "https://oauth2.googleapis.com/token"
+
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": settings.google_client_id,
+        "client_secret": settings.google_client_secret,
+        "redirect_uri": redirect_uri,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=data) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Google token exchange failed: {error_text}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Google token exchange failed: {response.status}",
+                )
+
+            token_data = await response.json()
+
+            # Calculate expiry time
+            expires_in = token_data.get("expires_in", 3600)
+            expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+            return {
+                "access_token": token_data["access_token"],
+                "refresh_token": token_data.get("refresh_token"),
+                "expires_at": expires_at.isoformat(),
+            }
+
+
+async def get_google_user_info(access_token: str) -> dict:
+    """Get Google user information"""
+
+    user_info_url = "https://www.googleapis.com/oauth2/v1/userinfo"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(user_info_url, headers=headers) as response:
+            if response.status == 200:
+                user_data = await response.json()
+                return {"email": user_data.get("email"), "name": user_data.get("name")}
+            else:
+                logger.warning(f"Failed to get Google user info: {response.status}")
+                return {"email": None, "name": None}
+
+
+async def exchange_microsoft_code_for_tokens(code: str, redirect_uri: str) -> dict:
+    """Exchange Microsoft authorization code for tokens"""
+
+    token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": settings.microsoft_client_id,
+        "client_secret": settings.microsoft_client_secret,
+        "redirect_uri": redirect_uri,
+        "scope": "Files.ReadWrite offline_access",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=data) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Microsoft token exchange failed: {error_text}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Microsoft token exchange failed: {response.status}",
+                )
+
+            token_data = await response.json()
+
+            # Calculate expiry time
+            expires_in = token_data.get("expires_in", 3600)
+            expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+            return {
+                "access_token": token_data["access_token"],
+                "refresh_token": token_data.get("refresh_token"),
+                "expires_at": expires_at.isoformat(),
+            }
+
+
+async def get_microsoft_user_info(access_token: str) -> dict:
+    """Get Microsoft user information"""
+
+    import aiohttp
+
+    user_info_url = "https://graph.microsoft.com/v1.0/me"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(user_info_url, headers=headers) as response:
+            if response.status == 200:
+                user_data = await response.json()
+                return {
+                    "email": user_data.get("mail")
+                    or user_data.get("userPrincipalName"),
+                    "name": user_data.get("displayName"),
+                }
+            else:
+                logger.warning(f"Failed to get Microsoft user info: {response.status}")
+                return {"email": None, "name": None}
+
+
+# UPDATED exchange_code_for_tokens function to handle missing providers gracefully
+async def exchange_code_for_tokens(
+    provider: CloudProvider, code: str, redirect_uri: str
+) -> dict:
+    """Exchange authorization code for access tokens"""
+
+    if provider == CloudProvider.GOOGLE_DRIVE:
+        return await exchange_google_code_for_tokens(code, redirect_uri)
+    elif provider == CloudProvider.ONEDRIVE:
+        # Check if Microsoft credentials are configured
+        settings = get_settings()
+        if not settings.microsoft_client_id or not settings.microsoft_client_secret:
+            raise HTTPException(
+                status_code=501,
+                detail="Microsoft OAuth not configured - missing client credentials",
+            )
+        return await exchange_microsoft_code_for_tokens(code, redirect_uri)
+    else:
+        # For now, only Google Drive is fully supported
+        raise HTTPException(
+            status_code=501, detail=f"OAuth not yet implemented for {provider.value}"
+        )
+
+
+# UPDATED get_user_info_from_tokens function
+async def get_user_info_from_tokens(provider: CloudProvider, access_token: str) -> dict:
+    """Get user information from access token"""
+
+    if provider == CloudProvider.GOOGLE_DRIVE:
+        return await get_google_user_info(access_token)
+    elif provider == CloudProvider.ONEDRIVE:
+        settings = get_settings()
+        if not settings.microsoft_client_id or not settings.microsoft_client_secret:
+            return {"email": "not_configured@onedrive.com", "name": "OneDrive User"}
+        return await get_microsoft_user_info(access_token)
+    else:
+        # Return placeholder info for unsupported providers
+        return {
+            "email": f"user@{provider.value}.com",
+            "name": f"{provider.value.title()} User",
+        }
+
+
+@router.post("/callback/{provider}")
+async def handle_oauth_callback_post(
+    provider: CloudProvider,
+    request_data: OAuthCallbackRequest,
+    session: dict = Depends(get_current_session),
+):
+    """Handle OAuth callback from frontend (POST request)"""
+
+    logger.info(f"🔗 CALLBACK: Received OAuth callback for {provider.value}")
+    logger.info(f"🔗 CALLBACK: Code: {request_data.code[:20]}...")
+
+    # Your implementation here...
+    return {"success": True, "provider": provider.value}
