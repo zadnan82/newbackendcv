@@ -1,4 +1,4 @@
-# app/main.py
+# app/main.py - FIXED: Correct imports and session endpoint
 """
 Privacy-First CV Platform - Main FastAPI Application
 """
@@ -24,9 +24,14 @@ from app.database import (
     initialize_pricing_tiers,
 )
 from app.api import resume, cloud, ai_enhance, cover_letter
-from app.auth.sessions import get_current_session, create_anonymous_session
-from app.schemas import ErrorResponse
 
+# FIXED: Correct import of session functions - at module level, not in function
+from app.auth.sessions import (
+    get_current_session,
+    create_anonymous_session,
+    session_manager,  # Add this import
+)
+from app.schemas import ErrorResponse
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address)
 
@@ -117,36 +123,16 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
-
-@app.post("/api/session", tags=["Health & Analytics"])
-@limiter.limit("20/minute")  # Increased from 10/minute to 20/minute for development
-async def create_session(request: Request):
-    """Create anonymous session"""
-    try:
-        from .auth.sessions import create_anonymous_session
-
-        session_data = await create_anonymous_session(request)
-
-        return {
-            "session_id": session_data["session_id"],
-            "token": session_data["token"],
-            "expires_at": session_data["expires_at"],
-            "message": "Anonymous session created successfully",
-        }
-    except Exception as e:
-        logger.error(f"Session creation failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create session")
-
-
-# CORS middleware
-# In app/main.py, update the CORS middleware:
+# CORS middleware - FIXED: Allow all for development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "*",
-    ],  # Allow all for development
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "*",  # Allow all for development
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
@@ -154,7 +140,7 @@ app.add_middleware(
 )
 
 
-# Add this debug middleware (add after CORS middleware)
+# Add debug middleware (add after CORS middleware)
 @app.middleware("http")
 async def debug_requests(request: Request, call_next):
     """Debug middleware to log requests in development"""
@@ -218,13 +204,66 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+# =================== FIXED SESSION ENDPOINT ===================
+@app.post("/api/session", tags=["Health & Analytics"])
+@limiter.limit("20/minute")
+async def create_session_endpoint(request: Request):
+    """
+    FIXED: Create anonymous session with proper error handling
+    """
+    try:
+        logger.info("🔄 Creating new anonymous session...")
+
+        # Check for existing session in headers
+        auth_header = request.headers.get("Authorization")
+
+        if auth_header and auth_header.startswith("Bearer "):
+            # Try to restore existing session
+            try:
+                token = auth_header.replace("Bearer ", "")
+                token_data = session_manager.decode_session_token(token)
+                session_id = token_data.get("session_id")
+
+                if session_id:
+                    # Check if session exists in database
+                    existing_session = await session_manager.get_session(session_id)
+                    if existing_session:
+                        logger.info(f"✅ Existing session restored: {session_id}")
+                        return {
+                            "session_id": existing_session["session_id"],
+                            "token": token,  # Return the same token
+                            "expires_at": existing_session["expires_at"],
+                            "restored": True,
+                            "message": "Session restored successfully",
+                        }
+            except Exception as e:
+                logger.warning(f"Failed to restore existing session: {e}")
+                # Continue to create new session
+
+        # Create new session
+        session_data = await create_anonymous_session(request)
+
+        logger.info(f"✅ New session created: {session_data['session_id']}")
+
+        return {
+            "session_id": session_data["session_id"],
+            "token": session_data["token"],
+            "expires_at": session_data["expires_at"],
+            "restored": False,
+            "message": "Anonymous session created successfully",
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Session creation failed: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create session: {str(e)}"
+        )
+
+
 # Include routers
 app.include_router(cloud.router, prefix="/api/cloud", tags=["Cloud Storage"])
-
 app.include_router(resume.router, prefix="/api/resume", tags=["Resume Management"])
-
 app.include_router(ai_enhance.router, prefix="/api/ai", tags=["AI Enhancement"])
-
 app.include_router(
     cover_letter.router, prefix="/api/cover-letter", tags=["Cover Letters"]
 )
@@ -234,7 +273,7 @@ app.include_router(
 @app.on_event("startup")
 async def startup_event():
     """Initialize application on startup"""
-    logger.info("Starting CV Privacy Platform...")
+    logger.info("🚀 Starting CV Privacy Platform...")
 
     # Check database connection
     if not check_database_connection():
@@ -250,13 +289,13 @@ async def startup_event():
     if not initialize_pricing_tiers():
         logger.warning("Failed to initialize pricing tiers")
 
-    logger.info("CV Privacy Platform started successfully")
+    logger.info("✅ CV Privacy Platform started successfully")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    logger.info("Shutting down CV Privacy Platform...")
+    logger.info("🛑 CV Privacy Platform shutting down...")
 
 
 # Health check endpoints
@@ -489,20 +528,6 @@ async def general_exception_handler(request: Request, exc: Exception):
         )
 
 
-# Session creation endpoint
-@app.post("/api/session", tags=["Health & Analytics"])
-@limiter.limit("10/minute")
-async def create_session(request: Request):
-    """Create anonymous session"""
-    session_data = await create_anonymous_session()
-
-    return {
-        "session_id": session_data["session_id"],
-        "expires_at": session_data["expires_at"],
-        "message": "Anonymous session created successfully",
-    }
-
-
 # Development endpoints (only in debug mode)
 if settings.debug:
 
@@ -576,6 +601,7 @@ async def redoc_html():
     <body>
         <redoc spec-url="/openapi.json"></redoc>
         <script src="https://cdn.jsdelivr.net/npm/redoc@2.0.0/bundles/redoc.standalone.js"></script>
+    </body>
     </body>
     </html>
     """)

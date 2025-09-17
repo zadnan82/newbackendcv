@@ -1,6 +1,7 @@
 # app/auth/sessions.py
 """
 Anonymous session management for privacy-first CV platform
+FIXED: Minor improvements for better error handling
 """
 
 import hashlib
@@ -12,12 +13,13 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 import logging
 
-from ..config import settings
+from ..config import get_settings
 from ..database import get_db
 from ..models import AnonymousSession
 from ..schemas import CloudProvider
 
 logger = logging.getLogger(__name__)
+settings = get_settings()  # FIXED: Get settings instance
 
 security = HTTPBearer(auto_error=False)
 
@@ -87,9 +89,13 @@ class SessionManager:
             # Encrypt cloud tokens if provided
             encrypted_tokens = None
             if cloud_tokens:
-                from ..cloud.service import cloud_service
+                try:
+                    from ..cloud.service import cloud_service
 
-                encrypted_tokens = cloud_service._encrypt_tokens(cloud_tokens)
+                    encrypted_tokens = cloud_service._encrypt_tokens(cloud_tokens)
+                except Exception as e:
+                    logger.warning(f"Failed to encrypt cloud tokens: {e}")
+                    # Continue without encrypted tokens
 
             # Create session record
             session = AnonymousSession(
@@ -122,6 +128,10 @@ class SessionManager:
                 "cloud_providers": list(cloud_tokens.keys()) if cloud_tokens else [],
             }
 
+        except Exception as e:
+            logger.error(f"Failed to create session: {e}")
+            db.rollback()  # FIXED: Add rollback on error
+            raise
         finally:
             db.close()
 
@@ -149,9 +159,13 @@ class SessionManager:
             # Decrypt cloud tokens
             cloud_tokens = {}
             if session.cloud_tokens:
-                from ..cloud.service import cloud_service
+                try:
+                    from ..cloud.service import cloud_service
 
-                cloud_tokens = cloud_service._decrypt_tokens(session.cloud_tokens)
+                    cloud_tokens = cloud_service._decrypt_tokens(session.cloud_tokens)
+                except Exception as e:
+                    logger.warning(f"Failed to decrypt cloud tokens: {e}")
+                    # Continue with empty tokens
 
             return {
                 "session_id": session.session_id,
@@ -161,6 +175,10 @@ class SessionManager:
                 "last_activity": session.last_activity.isoformat(),
             }
 
+        except Exception as e:
+            logger.error(f"Failed to get session: {e}")
+            db.rollback()  # FIXED: Add rollback on error
+            return None
         finally:
             db.close()
 
@@ -181,19 +199,28 @@ class SessionManager:
             )
 
             if not session:
+                logger.warning(f"Session not found for token update: {session_id}")
                 return False
 
             # Encrypt and update tokens
-            from ..cloud.service import cloud_service
+            try:
+                from ..cloud.service import cloud_service
 
-            session.cloud_tokens = cloud_service._encrypt_tokens(cloud_tokens)
+                session.cloud_tokens = cloud_service._encrypt_tokens(cloud_tokens)
+            except Exception as e:
+                logger.error(f"Failed to encrypt tokens: {e}")
+                return False
+
             session.last_activity = datetime.utcnow()
-
             db.commit()
 
             logger.info(f"Updated cloud tokens for session: {session_id}")
             return True
 
+        except Exception as e:
+            logger.error(f"Failed to update session tokens: {e}")
+            db.rollback()  # FIXED: Add rollback on error
+            return False
         finally:
             db.close()
 
@@ -216,6 +243,10 @@ class SessionManager:
 
             return False
 
+        except Exception as e:
+            logger.error(f"Failed to revoke session: {e}")
+            db.rollback()  # FIXED: Add rollback on error
+            return False
         finally:
             db.close()
 
@@ -241,6 +272,10 @@ class SessionManager:
 
             return expired_count
 
+        except Exception as e:
+            logger.error(f"Failed to cleanup sessions: {e}")
+            db.rollback()  # FIXED: Add rollback on error
+            return 0
         finally:
             db.close()
 
@@ -352,10 +387,14 @@ def validate_session_permissions(
 
     # Check session age
     if min_session_age_minutes > 0:
-        created_at = datetime.fromisoformat(session["created_at"])
-        age_minutes = (datetime.utcnow() - created_at).total_seconds() / 60
+        try:
+            created_at = datetime.fromisoformat(session["created_at"])
+            age_minutes = (datetime.utcnow() - created_at).total_seconds() / 60
 
-        if age_minutes < min_session_age_minutes:
+            if age_minutes < min_session_age_minutes:
+                return False
+        except Exception as e:
+            logger.warning(f"Failed to validate session age: {e}")
             return False
 
     # Check cloud provider connections
@@ -397,6 +436,10 @@ async def record_session_activity(
 
     except Exception as e:
         logger.warning(f"Failed to record analytics: {e}")
+        try:
+            db.rollback()
+        except:
+            pass
 
     finally:
         db.close()

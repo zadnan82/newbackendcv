@@ -6,7 +6,7 @@ Cloud provider connection and management API
 from datetime import datetime, timedelta
 import json
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import RedirectResponse
 import secrets
@@ -240,30 +240,268 @@ async def handle_oauth_callback_get(
         )
 
 
+# Add this helper function to your app/api/cloud.py file:
+
+
+async def _ensure_valid_google_token(token_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure Google token is valid, refresh if expired
+    CRITICAL FIX: Auto-refresh expired Google tokens
+    """
+    if not token_data.get("expires_at"):
+        return token_data
+
+    try:
+        from datetime import datetime
+
+        expires_at = datetime.fromisoformat(token_data["expires_at"])
+        now = datetime.utcnow()
+
+        # Check if token expires in the next 5 minutes
+        if (expires_at - now).total_seconds() < 300:
+            logger.info(f"🔄 Google Drive token expired/expiring, refreshing...")
+
+            if not token_data.get("refresh_token"):
+                logger.error(f"❌ No refresh token available for Google Drive")
+                return token_data
+
+            try:
+                # Refresh using your existing function
+                refreshed_tokens = await exchange_google_code_for_tokens(
+                    code=None,  # Not needed for refresh
+                    redirect_uri=settings.google_redirect_uri,
+                    refresh_token=token_data[
+                        "refresh_token"
+                    ],  # We'll modify the function
+                )
+
+                # Merge old data with new tokens
+                updated_token_data = {
+                    **token_data,
+                    "access_token": refreshed_tokens["access_token"],
+                    "expires_at": refreshed_tokens["expires_at"],
+                    # Keep refresh token from new response or old one
+                    "refresh_token": refreshed_tokens.get(
+                        "refresh_token", token_data.get("refresh_token")
+                    ),
+                }
+
+                logger.info(f"✅ Successfully refreshed Google Drive token")
+                return updated_token_data
+
+            except Exception as refresh_error:
+                logger.error(f"❌ Token refresh failed: {refresh_error}")
+                return token_data
+
+    except Exception as e:
+        logger.warning(f"Token validation error: {e}")
+        return token_data
+
+
+# Modify your existing exchange_google_code_for_tokens function to handle refresh:
+
+
+async def exchange_google_code_for_tokens(
+    code: str = None, redirect_uri: str = None, refresh_token: str = None
+) -> dict:
+    """Exchange Google authorization code for tokens OR refresh existing token"""
+
+    token_url = "https://oauth2.googleapis.com/token"
+
+    if refresh_token:
+        # Refresh token flow
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": settings.google_client_id,
+            "client_secret": settings.google_client_secret,
+        }
+    else:
+        # Authorization code flow (existing)
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": settings.google_client_id,
+            "client_secret": settings.google_client_secret,
+            "redirect_uri": redirect_uri,
+        }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=data) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(
+                    f"Google token {'refresh' if refresh_token else 'exchange'} failed: {error_text}"
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Google token {'refresh' if refresh_token else 'exchange'} failed: {response.status}",
+                )
+
+            token_data = await response.json()
+
+            # Calculate expiry time
+            expires_in = token_data.get("expires_in", 3600)
+            expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+            return {
+                "access_token": token_data["access_token"],
+                "refresh_token": token_data.get(
+                    "refresh_token"
+                ),  # May be None for refresh calls
+                "expires_at": expires_at.isoformat(),
+            }
+
+
 @router.get("/status", response_model=List[CloudConnectionStatus])
 async def get_connection_status(session: dict = Depends(get_current_session)):
-    """Get connection status for all cloud providers"""
+    """Get connection status for all cloud providers with auto token refresh"""
 
     try:
         cloud_tokens = session.get("cloud_tokens", {})
 
-        # DEBUG: Log what tokens we have
         logger.info(f"🔍 STATUS: Session ID: {session.get('session_id')}")
         logger.info(f"🔍 STATUS: Cloud tokens found: {list(cloud_tokens.keys())}")
 
-        # Check if we have Google tokens specifically
+        if not cloud_tokens:
+            # Return all providers as disconnected
+            return [
+                CloudConnectionStatus(
+                    provider=CloudProvider.GOOGLE_DRIVE,
+                    connected=False,
+                    email=None,
+                    storage_quota=None,
+                ),
+                CloudConnectionStatus(
+                    provider=CloudProvider.ONEDRIVE,
+                    connected=False,
+                    email=None,
+                    storage_quota=None,
+                ),
+                CloudConnectionStatus(
+                    provider=CloudProvider.DROPBOX,
+                    connected=False,
+                    email=None,
+                    storage_quota=None,
+                ),
+                CloudConnectionStatus(
+                    provider=CloudProvider.BOX,
+                    connected=False,
+                    email=None,
+                    storage_quota=None,
+                ),
+            ]
+
+        statuses = []
+        tokens_updated = False
+
+        # Check Google Drive with auto-refresh
         if "google_drive" in cloud_tokens:
-            logger.info(
-                f"🔍 STATUS: Google Drive token data: {cloud_tokens['google_drive'].keys()}"
-            )
-            logger.info(
-                f"🔍 STATUS: Google Drive email: {cloud_tokens['google_drive'].get('email')}"
+            try:
+                token_data = cloud_tokens["google_drive"]
+                logger.info(
+                    f"🔍 STATUS: Google Drive token data keys: {list(token_data.keys())}"
+                )
+
+                # CRITICAL FIX: Auto-refresh expired token
+                refreshed_token_data = await _ensure_valid_google_token(token_data)
+
+                # Update tokens if they were refreshed
+                if refreshed_token_data != token_data:
+                    cloud_tokens["google_drive"] = refreshed_token_data
+                    tokens_updated = True
+                    logger.info("🔄 Google Drive tokens were refreshed")
+
+                access_token = refreshed_token_data.get("access_token")
+
+                if access_token:
+                    # Test the connection
+                    async with aiohttp.ClientSession() as client_session:
+                        async with client_session.get(
+                            "https://www.googleapis.com/oauth2/v1/userinfo",
+                            headers={"Authorization": f"Bearer {access_token}"},
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as response:
+                            if response.status == 200:
+                                user_info = await response.json()
+                                logger.info(f"✅ Google Drive connection verified")
+
+                                statuses.append(
+                                    CloudConnectionStatus(
+                                        provider=CloudProvider.GOOGLE_DRIVE,
+                                        connected=True,
+                                        email=user_info.get("email"),
+                                        storage_quota=None,  # Can add quota check later
+                                    )
+                                )
+                            else:
+                                logger.warning(
+                                    f"❌ Google Drive connection test failed: {response.status}"
+                                )
+                                statuses.append(
+                                    CloudConnectionStatus(
+                                        provider=CloudProvider.GOOGLE_DRIVE,
+                                        connected=False,
+                                        email=None,
+                                        storage_quota=None,
+                                    )
+                                )
+                else:
+                    logger.warning("❌ No access token for Google Drive")
+                    statuses.append(
+                        CloudConnectionStatus(
+                            provider=CloudProvider.GOOGLE_DRIVE,
+                            connected=False,
+                            email=None,
+                            storage_quota=None,
+                        )
+                    )
+
+            except Exception as e:
+                logger.error(f"Google Drive status check error: {e}")
+                statuses.append(
+                    CloudConnectionStatus(
+                        provider=CloudProvider.GOOGLE_DRIVE,
+                        connected=False,
+                        email=None,
+                        storage_quota=None,
+                    )
+                )
+        else:
+            statuses.append(
+                CloudConnectionStatus(
+                    provider=CloudProvider.GOOGLE_DRIVE,
+                    connected=False,
+                    email=None,
+                    storage_quota=None,
+                )
             )
 
-        # Get status for all providers
-        statuses = await cloud_service.get_all_connection_statuses(cloud_tokens)
+        # Add other providers (not connected for now)
+        for provider in [
+            CloudProvider.ONEDRIVE,
+            CloudProvider.DROPBOX,
+            CloudProvider.BOX,
+        ]:
+            statuses.append(
+                CloudConnectionStatus(
+                    provider=provider,
+                    connected=False,
+                    email=None,
+                    storage_quota=None,
+                )
+            )
 
-        logger.info(f"🔍 STATUS: Returning statuses: {[s.dict() for s in statuses]}")
+        # CRITICAL: Update session with refreshed tokens
+        if tokens_updated:
+            logger.info("💾 Updating session with refreshed tokens...")
+            await session_manager.update_session_cloud_tokens(
+                session["session_id"], cloud_tokens
+            )
+
+        logger.info(
+            f"🔍 STATUS: Returning statuses with connected count: {sum(1 for s in statuses if s.connected)}"
+        )
 
         return statuses
 
@@ -535,42 +773,6 @@ async def handle_oauth_callback_post(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def exchange_google_code_for_tokens(code: str, redirect_uri: str) -> dict:
-    """Exchange Google authorization code for tokens"""
-
-    token_url = "https://oauth2.googleapis.com/token"
-
-    data = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "client_id": settings.google_client_id,
-        "client_secret": settings.google_client_secret,
-        "redirect_uri": redirect_uri,
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(token_url, data=data) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Google token exchange failed: {error_text}")
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Google token exchange failed: {response.status}",
-                )
-
-            token_data = await response.json()
-
-            # Calculate expiry time
-            expires_in = token_data.get("expires_in", 3600)
-            expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-
-            return {
-                "access_token": token_data["access_token"],
-                "refresh_token": token_data.get("refresh_token"),
-                "expires_at": expires_at.isoformat(),
-            }
-
-
 async def get_google_user_info(access_token: str) -> dict:
     """Get Google user information"""
 
@@ -755,3 +957,67 @@ async def save_cv_to_cloud(
                 return await resp.json()
 
     raise HTTPException(501, f"Saving not implemented for {provider.value}")
+
+
+# Add this debug endpoint to your app/api/cloud.py to see what's happening
+
+
+@router.get("/debug/status")
+async def debug_connection_status(session: dict = Depends(get_current_session)):
+    """Debug endpoint to see raw connection status"""
+
+    try:
+        cloud_tokens = session.get("cloud_tokens", {})
+
+        logger.info(f"🔍 DEBUG: Session ID: {session.get('session_id')}")
+        logger.info(f"🔍 DEBUG: Cloud tokens found: {list(cloud_tokens.keys())}")
+
+        # Log each token's details (safely)
+        for provider_name, token_data in cloud_tokens.items():
+            logger.info(
+                f"🔍 DEBUG: {provider_name} token data keys: {list(token_data.keys())}"
+            )
+            logger.info(
+                f"🔍 DEBUG: {provider_name} has access_token: {'access_token' in token_data}"
+            )
+            logger.info(
+                f"🔍 DEBUG: {provider_name} email: {token_data.get('email', 'not set')}"
+            )
+
+        # Get status for all providers (same as normal endpoint but with debug)
+        if not cloud_tokens:
+            return {
+                "debug": "No cloud tokens found in session",
+                "session_keys": list(session.keys()),
+                "cloud_tokens": {},
+            }
+
+        statuses = await cloud_service.get_all_connection_statuses(cloud_tokens)
+
+        # Convert to debug format
+        debug_statuses = []
+        for status in statuses:
+            debug_statuses.append(
+                {
+                    "provider": status.provider,
+                    "connected": status.connected,
+                    "email": status.email if hasattr(status, "email") else None,
+                    "error": status.error if hasattr(status, "error") else None,
+                    "raw_status": status.dict(),
+                }
+            )
+
+        return {
+            "debug": "Cloud status debug info",
+            "token_count": len(cloud_tokens),
+            "statuses": debug_statuses,
+            "connected_count": sum(1 for s in statuses if s.connected),
+        }
+
+    except Exception as e:
+        logger.error(f"Debug status error: {str(e)}")
+        return {
+            "debug": "Error occurred",
+            "error": str(e),
+            "session_id": session.get("session_id", "unknown"),
+        }
