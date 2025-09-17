@@ -26,14 +26,11 @@ except ImportError:
 from ..config import get_settings, CloudConfig
 from ..schemas import CloudProvider
 from ..database import get_db
-from ..models import Base, OAuthState
+from ..models import OAuthState
 from sqlalchemy import Column, String, DateTime, Text
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
-
-
-# OAuth state storage model for database fallback
 
 
 class OAuthStateStorage:
@@ -41,7 +38,12 @@ class OAuthStateStorage:
 
     def __init__(self):
         self.redis_client = None
-        self.use_redis = REDIS_AVAILABLE and settings.use_redis_for_oauth_state
+        # Check if we can use Redis for OAuth state storage
+        self.use_redis = (
+            REDIS_AVAILABLE
+            and hasattr(settings, "use_redis_for_oauth_state")
+            and settings.use_redis_for_oauth_state
+        )
 
         if self.use_redis:
             try:
@@ -176,26 +178,26 @@ class OAuthManager:
                 "scopes": CloudConfig.PROVIDERS["google_drive"]["scopes"],
             },
             CloudProvider.ONEDRIVE: {
-                "client_id": settings.microsoft_client_id,
-                "client_secret": settings.microsoft_client_secret,
-                "redirect_uri": settings.microsoft_redirect_uri,
+                "client_id": getattr(settings, "microsoft_client_id", None),
+                "client_secret": getattr(settings, "microsoft_client_secret", None),
+                "redirect_uri": getattr(settings, "microsoft_redirect_uri", None),
                 "auth_url": CloudConfig.PROVIDERS["onedrive"]["auth_url"],
                 "token_url": CloudConfig.PROVIDERS["onedrive"]["token_url"],
                 "scopes": CloudConfig.PROVIDERS["onedrive"]["scopes"],
             },
             CloudProvider.DROPBOX: {
-                "client_id": settings.dropbox_app_key,
-                "client_secret": settings.dropbox_app_secret,
-                "redirect_uri": settings.dropbox_redirect_uri,
+                "client_id": getattr(settings, "dropbox_app_key", None),
+                "client_secret": getattr(settings, "dropbox_app_secret", None),
+                "redirect_uri": getattr(settings, "dropbox_redirect_uri", None),
                 "auth_url": CloudConfig.PROVIDERS["dropbox"]["auth_url"],
                 "token_url": CloudConfig.PROVIDERS["dropbox"]["token_url"],
                 "revoke_url": CloudConfig.PROVIDERS["dropbox"].get("revoke_url"),
                 "scopes": CloudConfig.PROVIDERS["dropbox"]["scopes"],
             },
             CloudProvider.BOX: {
-                "client_id": settings.box_client_id,
-                "client_secret": settings.box_client_secret,
-                "redirect_uri": settings.box_redirect_uri,
+                "client_id": getattr(settings, "box_client_id", None),
+                "client_secret": getattr(settings, "box_client_secret", None),
+                "redirect_uri": getattr(settings, "box_redirect_uri", None),
                 "auth_url": CloudConfig.PROVIDERS["box"]["auth_url"],
                 "token_url": CloudConfig.PROVIDERS["box"]["token_url"],
                 "revoke_url": CloudConfig.PROVIDERS["box"].get("revoke_url"),
@@ -211,10 +213,17 @@ class OAuthManager:
         """Generate OAuth authorization URL"""
 
         config = self._get_provider_config(provider)
-        logger.info(f"🔍 OAuth Config - Redirect URI: {config['redirect_uri']}")
-        logger.info(f"🔍 OAuth Config - Client ID: {config['client_id']}")
         if not config:
             raise ValueError(f"Unsupported provider: {provider}")
+
+        # Check if provider is properly configured
+        if not config.get("client_id") or not config.get("client_secret"):
+            raise ValueError(
+                f"Provider {provider.value} is not properly configured - missing client credentials"
+            )
+
+        logger.info(f"🔍 OAuth Config - Redirect URI: {config['redirect_uri']}")
+        logger.info(f"🔍 OAuth Config - Client ID: {config['client_id']}")
 
         # Generate OAuth state
         oauth_state = f"{provider.value}_{state}_{session_id}"
@@ -226,8 +235,10 @@ class OAuthManager:
             "created_at": datetime.utcnow().isoformat(),
         }
 
+        # Get expiry minutes from settings or use default
+        expiry_minutes = getattr(settings, "oauth_state_expiry_minutes", 10)
         await self.state_storage.store_state(
-            oauth_state, state_data, expires_minutes=settings.oauth_state_expiry_minutes
+            oauth_state, state_data, expires_minutes=expiry_minutes
         )
 
         # Build authorization URL based on provider

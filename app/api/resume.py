@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# In resume.py - Add debug logging
 @router.post("/", response_model=ResumeResponse)
 async def create_resume(
     cv_data: CompleteCV,
@@ -30,17 +31,26 @@ async def create_resume(
 ):
     """Create a new resume and save to cloud storage"""
 
+    logger.info(f"📝 Creating resume for provider: {provider.value}")
+    logger.info(f"📝 Session ID: {session.get('session_id')}")
+    logger.info(f"📝 CV Title: {cv_data.title}")
+
     try:
         # Check if user has connected the specified provider
         cloud_tokens = session.get("cloud_tokens", {})
+        logger.info(f"📝 Available cloud tokens: {list(cloud_tokens.keys())}")
+
         if provider.value not in cloud_tokens:
+            logger.error(f"❌ Provider {provider.value} not found in session tokens")
             raise HTTPException(
                 status_code=403,
-                detail=f"No {provider.value} connection found. Please connect your {provider.value} account first.",
+                detail=f"No {provider.value} connection found.",
             )
 
         # Save CV to cloud
+        logger.info(f"💾 Saving CV to {provider.value}...")
         file_id = await cloud_service.save_cv(cloud_tokens, provider, cv_data)
+        logger.info(f"✅ CV saved with file ID: {file_id}")
 
         # Record activity
         await record_session_activity(

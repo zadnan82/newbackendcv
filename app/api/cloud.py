@@ -4,15 +4,17 @@ Cloud provider connection and management API
 """
 
 from datetime import datetime, timedelta
+import json
 import logging
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import RedirectResponse
 import secrets
 import asyncio
 
 from pydantic import BaseModel
 
+from app.api.resume import create_resume
 from app.config import get_settings
 
 from ..schemas import (
@@ -21,6 +23,7 @@ from ..schemas import (
     CloudAuthResponse,
     CloudConnectionStatus,
     CloudSession,
+    CompleteCV,
 )
 from ..auth.sessions import (
     get_current_session,
@@ -31,6 +34,8 @@ from ..auth.sessions import (
 from ..auth.oauth import oauth_manager
 from ..cloud.service import cloud_service, CloudProviderError
 import aiohttp
+
+from app.auth import sessions
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,12 +105,138 @@ async def initiate_cloud_connection(
             provider, session_id, state
         )
 
+        logger.info(f"🔗 CONNECT: Generated auth URL for {provider.value}")
+        logger.info(f"🔗 CONNECT: Auth URL: {auth_url}")
+
         return CloudAuthResponse(auth_url=auth_url, state=oauth_state)
 
     except Exception as e:
         logger.error(f"Cloud connection initiation error: {str(e)}")
         raise HTTPException(
             status_code=500, detail="Failed to initiate cloud connection"
+        )
+
+
+# ===== FIXED: ADD GET ENDPOINT FOR OAUTH CALLBACK =====
+@router.get("/callback/{provider}")
+async def handle_oauth_callback_get(
+    request: Request,  # Add this to access the request
+    provider: CloudProvider,
+    code: str = Query(..., description="Authorization code from OAuth provider"),
+    state: str = Query(..., description="State parameter from OAuth provider"),
+    scope: Optional[str] = Query(None, description="Granted scopes"),
+    error: Optional[str] = Query(None, description="Error from OAuth provider"),
+    error_description: Optional[str] = Query(None, description="Error description"),
+):
+    """
+    Handle OAuth callback from cloud providers (GET method)
+    This is the endpoint that Google/Microsoft/etc will redirect to
+    """
+
+    logger.info(f"🔗 GET CALLBACK: Processing OAuth callback for {provider.value}")
+    logger.info(f"🔗 GET CALLBACK: Code: {code[:20] if code else 'None'}...")
+    logger.info(f"🔗 GET CALLBACK: State: {state}")
+    logger.info(f"🔗 GET CALLBACK: Scope: {scope}")
+
+    # Check for OAuth errors first
+    if error:
+        logger.error(f"❌ GET CALLBACK: OAuth error: {error}")
+        error_msg = f"OAuth authorization failed: {error}"
+        if error_description:
+            error_msg += f" - {error_description}"
+
+        # Redirect to frontend with error
+        frontend_url = (
+            f"http://localhost:5173/cloud/callback/{provider.value}?error={error}"
+        )
+        if error_description:
+            frontend_url += f"&error_description={error_description}"
+
+        return RedirectResponse(url=frontend_url)
+
+    if not code:
+        logger.error("❌ GET CALLBACK: No authorization code received")
+        return RedirectResponse(
+            url=f"http://localhost:5173/cloud/callback/{provider.value}?error=no_code"
+        )
+
+    if not state:
+        logger.error("❌ GET CALLBACK: No state parameter received")
+        return RedirectResponse(
+            url=f"http://localhost:5173/cloud/callback/{provider.value}?error=no_state"
+        )
+
+    try:
+        # Process the OAuth callback
+        logger.info("🔄 GET CALLBACK: Exchanging authorization code for tokens...")
+
+        # Exchange authorization code for tokens using the configured redirect URI
+        redirect_uri = (
+            settings.google_redirect_uri
+            if provider == CloudProvider.GOOGLE_DRIVE
+            else None
+        )
+        if not redirect_uri:
+            raise ValueError(f"No redirect URI configured for {provider.value}")
+
+        tokens = await exchange_code_for_tokens(provider, code, redirect_uri)
+        logger.info("✅ GET CALLBACK: Successfully exchanged code for tokens")
+
+        # Get user info
+        user_info = await get_user_info_from_tokens(provider, tokens["access_token"])
+        logger.info(
+            f"✅ GET CALLBACK: Got user info: {user_info.get('email', 'no email')}"
+        )
+
+        # FIX: Extract session ID from state parameter
+        # The state parameter is typically formatted as "session_id:csrf_token"
+        try:
+            # Split the state to get session_id (first part before colon)
+            session_id = state.split(":")[0] if ":" in state else state
+            logger.info(f"🔄 GET CALLBACK: Extracted session ID: {session_id}")
+
+            # Verify session exists
+            session_data = await session_manager.get_session(session_id)
+            if not session_data:
+                logger.error(f"❌ GET CALLBACK: Session not found: {session_id}")
+                raise HTTPException(status_code=400, detail="Invalid session")
+
+            logger.info(f"🔄 GET CALLBACK: Storing tokens for session: {session_id}")
+
+            # Get current session tokens
+            cloud_tokens = session_data.get("cloud_tokens", {})
+
+            # Store the new tokens
+            cloud_tokens[provider.value] = {
+                "access_token": tokens["access_token"],
+                "refresh_token": tokens.get("refresh_token"),
+                "expires_at": tokens.get("expires_at"),
+                "email": user_info.get("email"),
+                "name": user_info.get("name"),
+            }
+
+            # Update session
+            await session_manager.update_session_cloud_tokens(session_id, cloud_tokens)
+            logger.info(
+                f"✅ GET CALLBACK: Successfully stored tokens for {provider.value}"
+            )
+
+        except Exception as storage_error:
+            logger.error(f"❌ GET CALLBACK: Failed to store tokens: {storage_error}")
+            # Continue with redirect even if storage fails
+
+        # Redirect to frontend callback handler with success
+        frontend_url = f"http://localhost:5173/cloud/callback/{provider.value}?success=true&provider={provider.value}"
+
+        logger.info(f"✅ GET CALLBACK: Redirecting to frontend: {frontend_url}")
+
+        return RedirectResponse(url=frontend_url)
+
+    except Exception as e:
+        logger.error(f"❌ GET CALLBACK: Error processing callback: {str(e)}")
+        # Redirect to frontend with error
+        return RedirectResponse(
+            url=f"http://localhost:5173/cloud/callback/{provider.value}?error=processing_failed&error_description={str(e)}"
         )
 
 
@@ -119,7 +250,15 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
         # DEBUG: Log what tokens we have
         logger.info(f"🔍 STATUS: Session ID: {session.get('session_id')}")
         logger.info(f"🔍 STATUS: Cloud tokens found: {list(cloud_tokens.keys())}")
-        logger.info(f"🔍 STATUS: Full cloud_tokens: {cloud_tokens}")
+
+        # Check if we have Google tokens specifically
+        if "google_drive" in cloud_tokens:
+            logger.info(
+                f"🔍 STATUS: Google Drive token data: {cloud_tokens['google_drive'].keys()}"
+            )
+            logger.info(
+                f"🔍 STATUS: Google Drive email: {cloud_tokens['google_drive'].get('email')}"
+            )
 
         # Get status for all providers
         statuses = await cloud_service.get_all_connection_statuses(cloud_tokens)
@@ -343,28 +482,30 @@ class OAuthCallbackRequest(BaseModel):
     redirect_uri: str
 
 
+# KEEP POST ENDPOINT FOR FRONTEND AJAX CALLS
 @router.post("/callback/{provider}")
 async def handle_oauth_callback_post(
     provider: CloudProvider,
     request_data: OAuthCallbackRequest,
     session: dict = Depends(get_current_session),
 ):
-    logger.info(f"🔗 CALLBACK: Processing OAuth callback for {provider.value}")
-    logger.info(f"🔗 CALLBACK: Code: {request_data.code[:20]}...")
-    logger.info(f"🔗 CALLBACK: State: {request_data.state}")
+    """Handle OAuth callback via POST (for frontend AJAX calls)"""
+    logger.info(f"🔗 POST CALLBACK: Processing OAuth callback for {provider.value}")
+    logger.info(f"🔗 POST CALLBACK: Code: {request_data.code[:20]}...")
+    logger.info(f"🔗 POST CALLBACK: State: {request_data.state}")
 
     try:
-        # ACTUALLY exchange the code for real tokens
+        # Exchange the code for tokens
         token_data = await exchange_code_for_tokens(
             provider, request_data.code, request_data.redirect_uri
         )
 
-        # Get user info from the real tokens
+        # Get user info from tokens
         user_info = await get_user_info_from_tokens(
             provider, token_data["access_token"]
         )
 
-        # Store the REAL tokens in session
+        # Store tokens in session
         session_tokens = session.get("cloud_tokens", {})
         session_tokens[provider.value] = {
             "access_token": token_data["access_token"],
@@ -374,12 +515,12 @@ async def handle_oauth_callback_post(
             "name": user_info.get("name"),
         }
 
-        # Update session with REAL tokens
+        # Update session with tokens
         await session_manager.update_session_cloud_tokens(
             session["session_id"], session_tokens
         )
 
-        logger.info(f"✅ CALLBACK: Successfully connected {provider.value}")
+        logger.info(f"✅ POST CALLBACK: Successfully connected {provider.value}")
         logger.info(f"✅ User email: {user_info.get('email')}")
 
         return {
@@ -390,17 +531,12 @@ async def handle_oauth_callback_post(
         }
 
     except Exception as e:
-        logger.error(f"❌ CALLBACK: Error processing callback: {e}")
+        logger.error(f"❌ POST CALLBACK: Error processing callback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 async def exchange_google_code_for_tokens(code: str, redirect_uri: str) -> dict:
     """Exchange Google authorization code for tokens"""
-
-    import aiohttp
-    from ..config import get_settings
-
-    settings = get_settings()
 
     token_url = "https://oauth2.googleapis.com/token"
 
@@ -491,8 +627,6 @@ async def exchange_microsoft_code_for_tokens(code: str, redirect_uri: str) -> di
 async def get_microsoft_user_info(access_token: str) -> dict:
     """Get Microsoft user information"""
 
-    import aiohttp
-
     user_info_url = "https://graph.microsoft.com/v1.0/me"
     headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -510,7 +644,6 @@ async def get_microsoft_user_info(access_token: str) -> dict:
                 return {"email": None, "name": None}
 
 
-# UPDATED exchange_code_for_tokens function to handle missing providers gracefully
 async def exchange_code_for_tokens(
     provider: CloudProvider, code: str, redirect_uri: str
 ) -> dict:
@@ -520,7 +653,6 @@ async def exchange_code_for_tokens(
         return await exchange_google_code_for_tokens(code, redirect_uri)
     elif provider == CloudProvider.ONEDRIVE:
         # Check if Microsoft credentials are configured
-        settings = get_settings()
         if not settings.microsoft_client_id or not settings.microsoft_client_secret:
             raise HTTPException(
                 status_code=501,
@@ -534,14 +666,12 @@ async def exchange_code_for_tokens(
         )
 
 
-# UPDATED get_user_info_from_tokens function
 async def get_user_info_from_tokens(provider: CloudProvider, access_token: str) -> dict:
     """Get user information from access token"""
 
     if provider == CloudProvider.GOOGLE_DRIVE:
         return await get_google_user_info(access_token)
     elif provider == CloudProvider.ONEDRIVE:
-        settings = get_settings()
         if not settings.microsoft_client_id or not settings.microsoft_client_secret:
             return {"email": "not_configured@onedrive.com", "name": "OneDrive User"}
         return await get_microsoft_user_info(access_token)
@@ -566,3 +696,62 @@ async def debug_oauth_config():
                 "has_client_secret": bool(config["client_secret"]),
             }
     return configs
+
+
+@router.get("/debug/tokens/{session_id}")
+async def debug_session_tokens(session_id: str):
+    """Debug endpoint to check stored tokens for a session"""
+    try:
+        session_data = await session_manager.get_session(session_id)
+        if not session_data:
+            return {"error": "Session not found"}
+
+        cloud_tokens = session_data.get("cloud_tokens", {})
+        return {
+            "session_id": session_id,
+            "cloud_tokens": cloud_tokens,
+            "providers": list(cloud_tokens.keys()),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/save/{provider}")
+async def save_cv_to_cloud(
+    provider: CloudProvider,
+    cv: dict,
+    session: dict = Depends(get_current_session),
+):
+    """Save a CV JSON into the user's cloud provider"""
+    if provider.value not in session.get("cloud_tokens", {}):
+        raise HTTPException(403, f"Not connected to {provider.value}")
+
+    access_token = session["cloud_tokens"][provider.value]["access_token"]
+
+    if provider == CloudProvider.GOOGLE_DRIVE:
+        metadata = {
+            "name": cv.get("title", "resume") + ".json",
+            "mimeType": "application/json",
+        }
+        files = {
+            "metadata": ("metadata", json.dumps(metadata), "application/json"),
+            "file": ("file", json.dumps(cv), "application/json"),
+        }
+
+        upload_url = (
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+        )
+
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                upload_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                data=files,
+            ) as resp:
+                if resp.status not in (200, 201):
+                    text = await resp.text()
+                    logger.error(f"❌ Google Drive upload failed: {text}")
+                    raise HTTPException(500, "Failed to upload file to Google Drive")
+                return await resp.json()
+
+    raise HTTPException(501, f"Saving not implemented for {provider.value}")
