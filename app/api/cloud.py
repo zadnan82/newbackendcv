@@ -109,64 +109,6 @@ async def initiate_cloud_connection(
         )
 
 
-@router.get("/callback/{provider}")
-async def handle_oauth_callback(
-    provider: CloudProvider,
-    code: str,
-    state: str,
-    request: Request,
-    session_id: str = None,
-):
-    """Handle OAuth callback from cloud provider"""
-
-    try:
-        # Exchange code for tokens
-        tokens = await oauth_manager.exchange_code_for_tokens(
-            provider, code, state, session_id
-        )
-
-        # Get or create session
-        if session_id:
-            session_data = await session_manager.get_session(session_id)
-            if session_data:
-                # Update existing session with new tokens
-                existing_tokens = session_data.get("cloud_tokens", {})
-                existing_tokens[provider.value] = tokens
-
-                await session_manager.update_session_cloud_tokens(
-                    session_id, existing_tokens
-                )
-            else:
-                # Create new session
-                session_data = await session_manager.create_anonymous_session(
-                    request, {provider.value: tokens}
-                )
-        else:
-            # Create new session
-            session_data = await session_manager.create_anonymous_session(
-                request, {provider.value: tokens}
-            )
-
-        # Record activity
-        await record_session_activity(
-            session_data["session_id"], "cloud_connected", {"provider": provider.value}
-        )
-
-        # Redirect to frontend with success
-        frontend_url = request.headers.get("referer", "http://localhost:3000")
-        return RedirectResponse(
-            url=f"{frontend_url}/cloud/connected?provider={provider.value}&session={session_data['token']}"
-        )
-
-    except Exception as e:
-        logger.error(f"OAuth callback error: {str(e)}")
-        # Redirect to frontend with error
-        frontend_url = request.headers.get("referer", "http://localhost:3000")
-        return RedirectResponse(
-            url=f"{frontend_url}/cloud/error?message=connection_failed"
-        )
-
-
 @router.get("/status", response_model=List[CloudConnectionStatus])
 async def get_connection_status(session: dict = Depends(get_current_session)):
     """Get connection status for all cloud providers"""
@@ -407,31 +349,44 @@ async def handle_oauth_callback_post(
     request_data: OAuthCallbackRequest,
     session: dict = Depends(get_current_session),
 ):
-    """Handle OAuth callback from frontend (POST request)"""
-
     logger.info(f"🔗 CALLBACK: Processing OAuth callback for {provider.value}")
     logger.info(f"🔗 CALLBACK: Code: {request_data.code[:20]}...")
     logger.info(f"🔗 CALLBACK: State: {request_data.state}")
 
     try:
-        # For now, just simulate success to test the flow
+        # ACTUALLY exchange the code for real tokens
+        token_data = await exchange_code_for_tokens(
+            provider, request_data.code, request_data.redirect_uri
+        )
+
+        # Get user info from the real tokens
+        user_info = await get_user_info_from_tokens(
+            provider, token_data["access_token"]
+        )
+
+        # Store the REAL tokens in session
         session_tokens = session.get("cloud_tokens", {})
         session_tokens[provider.value] = {
-            "access_token": "fake_token_for_testing",
-            "email": "test@gmail.com",
+            "access_token": token_data["access_token"],
+            "refresh_token": token_data.get("refresh_token"),
+            "expires_at": token_data.get("expires_at"),
+            "email": user_info.get("email"),
+            "name": user_info.get("name"),
         }
 
-        # Update session
+        # Update session with REAL tokens
         await session_manager.update_session_cloud_tokens(
             session["session_id"], session_tokens
         )
 
         logger.info(f"✅ CALLBACK: Successfully connected {provider.value}")
+        logger.info(f"✅ User email: {user_info.get('email')}")
 
         return {
             "success": True,
             "provider": provider.value,
             "message": "Connected successfully",
+            "email": user_info.get("email"),
         }
 
     except Exception as e:
@@ -598,16 +553,16 @@ async def get_user_info_from_tokens(provider: CloudProvider, access_token: str) 
         }
 
 
-@router.post("/callback/{provider}")
-async def handle_oauth_callback_post(
-    provider: CloudProvider,
-    request_data: OAuthCallbackRequest,
-    session: dict = Depends(get_current_session),
-):
-    """Handle OAuth callback from frontend (POST request)"""
-
-    logger.info(f"🔗 CALLBACK: Received OAuth callback for {provider.value}")
-    logger.info(f"🔗 CALLBACK: Code: {request_data.code[:20]}...")
-
-    # Your implementation here...
-    return {"success": True, "provider": provider.value}
+@router.get("/debug/oauth-config")
+async def debug_oauth_config():
+    """Debug endpoint to see actual OAuth configuration"""
+    configs = {}
+    for provider in CloudProvider:
+        config = oauth_manager._get_provider_config(provider)
+        if config:
+            configs[provider.value] = {
+                "client_id": config["client_id"],
+                "redirect_uri": config["redirect_uri"],
+                "has_client_secret": bool(config["client_secret"]),
+            }
+    return configs

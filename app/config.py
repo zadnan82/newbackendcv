@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
     google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
     google_redirect_uri: str = os.getenv(
-        "GOOGLE_REDIRECT_URI", "http://localhost:8000/api/cloud/callback/google_drive"
+        "GOOGLE_REDIRECT_URI", "http://localhost:5173/cloud/callback/google_drive"
     )
 
     # Microsoft OneDrive OAuth

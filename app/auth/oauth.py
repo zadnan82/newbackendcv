@@ -211,6 +211,8 @@ class OAuthManager:
         """Generate OAuth authorization URL"""
 
         config = self._get_provider_config(provider)
+        logger.info(f"🔍 OAuth Config - Redirect URI: {config['redirect_uri']}")
+        logger.info(f"🔍 OAuth Config - Client ID: {config['client_id']}")
         if not config:
             raise ValueError(f"Unsupported provider: {provider}")
 
