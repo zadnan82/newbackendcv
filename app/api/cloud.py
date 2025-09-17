@@ -353,9 +353,12 @@ async def exchange_google_code_for_tokens(
             }
 
 
+# In app/api/cloud.py - Fix the get_connection_status function
+
+
 @router.get("/status", response_model=List[CloudConnectionStatus])
 async def get_connection_status(session: dict = Depends(get_current_session)):
-    """Get connection status for all cloud providers with auto token refresh"""
+    """Get connection status for all cloud providers with simplified token handling"""
 
     try:
         cloud_tokens = session.get("cloud_tokens", {})
@@ -393,9 +396,8 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
             ]
 
         statuses = []
-        tokens_updated = False
 
-        # Check Google Drive with auto-refresh
+        # Check Google Drive - SIMPLIFIED without auto-refresh for now
         if "google_drive" in cloud_tokens:
             try:
                 token_data = cloud_tokens["google_drive"]
@@ -403,49 +405,62 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
                     f"🔍 STATUS: Google Drive token data keys: {list(token_data.keys())}"
                 )
 
-                # CRITICAL FIX: Auto-refresh expired token
-                refreshed_token_data = await _ensure_valid_google_token(token_data)
-
-                # Update tokens if they were refreshed
-                if refreshed_token_data != token_data:
-                    cloud_tokens["google_drive"] = refreshed_token_data
-                    tokens_updated = True
-                    logger.info("🔄 Google Drive tokens were refreshed")
-
-                access_token = refreshed_token_data.get("access_token")
+                access_token = token_data.get("access_token")
 
                 if access_token:
-                    # Test the connection
-                    async with aiohttp.ClientSession() as client_session:
-                        async with client_session.get(
-                            "https://www.googleapis.com/oauth2/v1/userinfo",
-                            headers={"Authorization": f"Bearer {access_token}"},
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as response:
-                            if response.status == 200:
-                                user_info = await response.json()
-                                logger.info(f"✅ Google Drive connection verified")
+                    # Simple connection test without token refresh
+                    logger.info("🔍 STATUS: Testing Google Drive connection...")
 
-                                statuses.append(
-                                    CloudConnectionStatus(
-                                        provider=CloudProvider.GOOGLE_DRIVE,
-                                        connected=True,
-                                        email=user_info.get("email"),
-                                        storage_quota=None,  # Can add quota check later
+                    import aiohttp
+
+                    async with aiohttp.ClientSession() as client_session:
+                        try:
+                            async with client_session.get(
+                                "https://www.googleapis.com/oauth2/v1/userinfo",
+                                headers={"Authorization": f"Bearer {access_token}"},
+                                timeout=aiohttp.ClientTimeout(total=10),
+                            ) as response:
+                                if response.status == 200:
+                                    user_info = await response.json()
+                                    logger.info(
+                                        f"✅ Google Drive connection verified for {user_info.get('email')}"
                                     )
-                                )
-                            else:
-                                logger.warning(
-                                    f"❌ Google Drive connection test failed: {response.status}"
-                                )
-                                statuses.append(
-                                    CloudConnectionStatus(
-                                        provider=CloudProvider.GOOGLE_DRIVE,
-                                        connected=False,
-                                        email=None,
-                                        storage_quota=None,
+
+                                    statuses.append(
+                                        CloudConnectionStatus(
+                                            provider=CloudProvider.GOOGLE_DRIVE,
+                                            connected=True,
+                                            email=user_info.get("email"),
+                                            storage_quota=None,
+                                        )
                                     )
+                                else:
+                                    logger.warning(
+                                        f"❌ Google Drive connection test failed: {response.status}"
+                                    )
+                                    response_text = await response.text()
+                                    logger.warning(f"❌ Response: {response_text}")
+
+                                    statuses.append(
+                                        CloudConnectionStatus(
+                                            provider=CloudProvider.GOOGLE_DRIVE,
+                                            connected=False,
+                                            email=None,
+                                            storage_quota=None,
+                                        )
+                                    )
+                        except Exception as request_error:
+                            logger.error(
+                                f"❌ Google Drive request failed: {request_error}"
+                            )
+                            statuses.append(
+                                CloudConnectionStatus(
+                                    provider=CloudProvider.GOOGLE_DRIVE,
+                                    connected=False,
+                                    email=None,
+                                    storage_quota=None,
                                 )
+                            )
                 else:
                     logger.warning("❌ No access token for Google Drive")
                     statuses.append(
@@ -458,7 +473,7 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
                     )
 
             except Exception as e:
-                logger.error(f"Google Drive status check error: {e}")
+                logger.error(f"❌ Google Drive status check error: {e}")
                 statuses.append(
                     CloudConnectionStatus(
                         provider=CloudProvider.GOOGLE_DRIVE,
@@ -468,6 +483,7 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
                     )
                 )
         else:
+            logger.info("❌ No Google Drive tokens found")
             statuses.append(
                 CloudConnectionStatus(
                     provider=CloudProvider.GOOGLE_DRIVE,
@@ -477,7 +493,7 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
                 )
             )
 
-        # Add other providers (not connected for now)
+        # Add other providers as disconnected for now
         for provider in [
             CloudProvider.ONEDRIVE,
             CloudProvider.DROPBOX,
@@ -492,22 +508,26 @@ async def get_connection_status(session: dict = Depends(get_current_session)):
                 )
             )
 
-        # CRITICAL: Update session with refreshed tokens
-        if tokens_updated:
-            logger.info("💾 Updating session with refreshed tokens...")
-            await session_manager.update_session_cloud_tokens(
-                session["session_id"], cloud_tokens
-            )
-
         logger.info(
-            f"🔍 STATUS: Returning statuses with connected count: {sum(1 for s in statuses if s.connected)}"
+            f"🔍 STATUS: Returning {len(statuses)} statuses with {sum(1 for s in statuses if s.connected)} connected"
         )
 
         return statuses
 
     except Exception as e:
-        logger.error(f"Connection status error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get connection status")
+        logger.error(f"❌ Connection status error: {str(e)}")
+        # Return default disconnected state on error
+        return [
+            CloudConnectionStatus(
+                provider=provider, connected=False, email=None, storage_quota=None
+            )
+            for provider in [
+                CloudProvider.GOOGLE_DRIVE,
+                CloudProvider.ONEDRIVE,
+                CloudProvider.DROPBOX,
+                CloudProvider.BOX,
+            ]
+        ]
 
 
 @router.get("/status/{provider}", response_model=CloudConnectionStatus)
