@@ -55,6 +55,13 @@ gunicorn==21.2.0
 pytest==7.4.3
 pytest-asyncio==0.21.1
 
+
+google-api-python-client>=2.0.0
+google-auth>=2.0.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=1.0.0
+
+
 # Optional: Document processing
 # python-docx>=0.8.11
 # PyPDF2>=3.0.0

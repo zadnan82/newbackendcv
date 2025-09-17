@@ -23,7 +23,7 @@ from app.database import (
     check_database_connection,
     initialize_pricing_tiers,
 )
-from app.api import resume, cloud, ai_enhance, cover_letter
+from app.api import google_drive_api, resume, cloud, ai_enhance, cover_letter
 
 # FIXED: Correct import of session functions - at module level, not in function
 from app.auth.sessions import (
@@ -137,6 +137,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
+    max_age=600,
 )
 
 
@@ -266,6 +267,9 @@ app.include_router(resume.router, prefix="/api/resume", tags=["Resume Management
 app.include_router(ai_enhance.router, prefix="/api/ai", tags=["AI Enhancement"])
 app.include_router(
     cover_letter.router, prefix="/api/cover-letter", tags=["Cover Letters"]
+)
+app.include_router(
+    google_drive_api.router, prefix="/api/google-drive", tags=["google-drive"]
 )
 
 
