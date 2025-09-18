@@ -714,3 +714,99 @@ async def debug_google_drive_session(session: dict = Depends(get_current_session
     except Exception as e:
         logger.error(f"❌ Debug info failed: {str(e)}")
         return {"error": str(e), "session_id": session.get("session_id", "unknown")}
+
+
+# Add this to your app/api/google_drive_api.py
+
+
+@router.get("/debug-download/{file_id}")
+async def debug_download_file(
+    file_id: str,
+    session: dict = Depends(get_current_session),
+):
+    """Debug endpoint to see what Google Drive actually returns"""
+    try:
+        cloud_tokens = session.get("cloud_tokens", {})
+        google_drive_tokens = cloud_tokens.get("google_drive")
+
+        if not google_drive_tokens:
+            return {"error": "No Google Drive connection found"}
+
+        access_token = google_drive_tokens["access_token"]
+
+        # Test different download methods
+        import aiohttp
+
+        results = {}
+
+        # Method 1: Direct file download with alt=media
+        try:
+            async with aiohttp.ClientSession() as client:
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
+                headers = {"Authorization": f"Bearer {access_token}"}
+
+                # Try alt=media
+                async with client.get(
+                    url, params={"alt": "media"}, headers=headers
+                ) as resp:
+                    content = await resp.text()
+                    results["alt_media"] = {
+                        "status": resp.status,
+                        "content_type": resp.headers.get("content-type"),
+                        "content_length": len(content),
+                        "content_preview": content[:200] + "..."
+                        if len(content) > 200
+                        else content,
+                        "is_json": content.strip().startswith("{"),
+                    }
+        except Exception as e:
+            results["alt_media"] = {"error": str(e)}
+
+        # Method 2: Get file metadata
+        try:
+            async with aiohttp.ClientSession() as client:
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
+                headers = {"Authorization": f"Bearer {access_token}"}
+
+                async with client.get(url, headers=headers) as resp:
+                    metadata = await resp.json()
+                    results["metadata"] = {
+                        "status": resp.status,
+                        "name": metadata.get("name"),
+                        "mimeType": metadata.get("mimeType"),
+                        "size": metadata.get("size"),
+                        "parents": metadata.get("parents"),
+                    }
+        except Exception as e:
+            results["metadata"] = {"error": str(e)}
+
+        # Method 3: Try export instead (for Google Docs format)
+        try:
+            async with aiohttp.ClientSession() as client:
+                url = f"https://www.googleapis.com/drive/v3/files/{file_id}/export"
+                headers = {"Authorization": f"Bearer {access_token}"}
+
+                async with client.get(
+                    url, params={"mimeType": "text/plain"}, headers=headers
+                ) as resp:
+                    content = await resp.text()
+                    results["export_text"] = {
+                        "status": resp.status,
+                        "content_type": resp.headers.get("content-type"),
+                        "content_length": len(content),
+                        "content_preview": content[:200] + "..."
+                        if len(content) > 200
+                        else content,
+                    }
+        except Exception as e:
+            results["export_text"] = {"error": str(e)}
+
+        return {
+            "file_id": file_id,
+            "debug_results": results,
+            "recommendation": "Check which method returns valid JSON content",
+        }
+
+    except Exception as e:
+        logger.error(f"Debug download failed: {str(e)}")
+        return {"error": str(e)}

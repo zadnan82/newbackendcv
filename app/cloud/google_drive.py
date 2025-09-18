@@ -272,83 +272,55 @@ class GoogleDriveProvider:
             raise GoogleDriveError(f"Failed to upload file: {e}")
 
     async def download_file(self, file_id: str) -> str:
-        """Download file content from Google Drive"""
+        """Download file content from Google Drive - FIXED VERSION"""
         try:
             logger.info(f"📥 Downloading file: {file_id}")
 
             url = f"{self.api_base}/files/{file_id}"
             params = {"alt": "media"}
 
-            result = await self._make_request("GET", url, params=params)
+            # Use direct request instead of _make_request for file downloads
+            headers = {"Authorization": f"Bearer {self.access_token}"}
 
-            # Handle the response
-            if isinstance(result, dict) and "content" in result:
-                content = result["content"]
+            logger.info(f"🔄 Making download request to: {url}")
+
+            async with self.session.get(
+                url, params=params, headers=headers
+            ) as response:
+                logger.info(f"📊 Download response status: {response.status}")
+                logger.info(
+                    f"📊 Content-Type: {response.headers.get('content-type', 'unknown')}"
+                )
+
+                if response.status == 401:
+                    error_text = await response.text()
+                    logger.error(f"❌ Google Drive token expired: {error_text}")
+                    raise GoogleDriveError("Access token expired or invalid")
+                elif response.status >= 400:
+                    error_text = await response.text()
+                    logger.error(
+                        f"❌ Google Drive API error {response.status}: {error_text}"
+                    )
+                    raise GoogleDriveError(f"API error {response.status}: {error_text}")
+
+                # Get the raw file content
+                content = await response.text()
                 logger.info(f"✅ File downloaded successfully ({len(content)} chars)")
+
+                # Log first few characters to debug
+                logger.info(f"📄 Content preview: {content[:100]}...")
+
                 return content
-            else:
-                logger.error("❌ Unexpected response format")
-                raise GoogleDriveError("Unexpected response format")
 
         except Exception as e:
             logger.error(f"❌ File download failed: {e}")
+            import traceback
+
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
             raise GoogleDriveError(f"Failed to download file: {e}")
 
-    async def delete_file(self, file_id: str) -> bool:
-        """Delete file from Google Drive"""
-        try:
-            logger.info(f"🗑️ Deleting file: {file_id}")
 
-            url = f"{self.api_base}/files/{file_id}"
-            await self._make_request("DELETE", url)
-
-            logger.info(f"✅ File deleted successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ File deletion failed: {e}")
-            return False
-
-    async def get_user_info(self) -> Dict[str, Any]:
-        """Get Google Drive user information"""
-        try:
-            url = f"{self.api_base}/about"
-            params = {"fields": "user(displayName,emailAddress)"}
-
-            result = await self._make_request("GET", url, params=params)
-            user = result.get("user", {})
-
-            return {
-                "name": user.get("displayName", ""),
-                "email": user.get("emailAddress", ""),
-                "provider": "google_drive",
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Get user info failed: {e}")
-            raise GoogleDriveError(f"Failed to get user info: {e}")
-
-    async def get_storage_quota(self) -> Dict[str, Any]:
-        """Get Google Drive storage quota"""
-        try:
-            url = f"{self.api_base}/about"
-            params = {"fields": "storageQuota"}
-
-            result = await self._make_request("GET", url, params=params)
-            quota = result.get("storageQuota", {})
-
-            total = int(quota.get("limit", 0))
-            used = int(quota.get("usage", 0))
-
-            return {
-                "total": total,
-                "used": used,
-                "available": max(0, total - used),
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Get storage quota failed: {e}")
-            return {"total": 0, "used": 0, "available": 0}
+# Make sure this method is properly indented inside the GoogleDriveProvider class
 
 
 class GoogleDriveOAuth:
