@@ -1,8 +1,9 @@
 # app/cloud/google_drive_service.py
 """
-Google Drive focused service - Simplified for debugging and reliability
+Google Drive focused service - Fixed to match frontend schema exactly
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -30,7 +31,7 @@ settings = get_settings()
 
 
 class GoogleDriveService:
-    """Focused service for Google Drive operations"""
+    """Fixed service for Google Drive operations - matches frontend schema exactly"""
 
     def __init__(self):
         # Use persistent encryption key from settings
@@ -71,10 +72,162 @@ class GoogleDriveService:
         try:
             data = json.loads(content)
             cv_data = data.get("cv_data", data)
-            return CompleteCV.parse_obj(cv_data)
+
+            # IMPORTANT: Convert the data to match frontend schema exactly
+            frontend_cv = self._convert_backend_to_frontend_schema(cv_data)
+
+            return CompleteCV.parse_obj(frontend_cv)
         except Exception as e:
             logger.error(f"CV parsing failed: {e}")
             raise ValueError(f"Invalid CV file format: {e}")
+
+    def _convert_frontend_to_backend_schema(self, cv_data: Dict) -> Dict:
+        """Convert frontend schema to backend schema - Updated for Base64 support"""
+        logger.info(
+            f"Converting frontend schema to backend: {cv_data.get('title', 'No title')}"
+        )
+
+        # Handle photo field - frontend sends 'photo', backend expects 'photo'
+        photo_data = cv_data.get("photo", cv_data.get("photos", {}))
+        if not isinstance(photo_data, dict):
+            photo_data = {"photolink": None}
+
+        # Log photo information for debugging
+        if photo_data.get("photolink"):
+            photolink = photo_data["photolink"]
+            if photolink.startswith("data:image"):
+                logger.info(
+                    f"📷 Base64 image detected, size: ~{len(photolink) // 1024}KB"
+                )
+            elif photolink.startswith("http"):
+                logger.info(f"📷 URL image detected: {photolink[:50]}...")
+            else:
+                logger.warning(f"📷 Unknown photo format: {photolink[:50]}...")
+
+        converted = {
+            "title": cv_data.get("title", "My Resume"),
+            "is_public": cv_data.get("is_public", False),
+            "customization": cv_data.get(
+                "customization",
+                {
+                    "template": "stockholm",
+                    "accent_color": "#1a5276",
+                    "font_family": "Helvetica, Arial, sans-serif",
+                    "line_spacing": 1.5,
+                    "headings_uppercase": False,
+                    "hide_skill_level": False,
+                    "language": "en",
+                },
+            ),
+            "personal_info": cv_data.get("personal_info", {}),
+            "educations": cv_data.get("educations", []),
+            "experiences": cv_data.get("experiences", []),
+            "skills": cv_data.get("skills", []),
+            "languages": cv_data.get("languages", []),
+            "referrals": cv_data.get("referrals", []),
+            "custom_sections": cv_data.get("custom_sections", []),
+            "extracurriculars": cv_data.get("extracurriculars", []),
+            "hobbies": cv_data.get("hobbies", []),
+            "courses": cv_data.get("courses", []),
+            "internships": cv_data.get("internships", []),
+            "photo": photo_data,  # Backend uses 'photo', same as frontend now
+        }
+
+        logger.info(
+            f"✅ Schema conversion completed - photo field: {bool(converted['photo'].get('photolink'))}"
+        )
+        return converted
+
+    # Add to the Google Drive service _prepare_cv_for_storage method
+    def _prepare_cv_for_storage(self, cv_data: CompleteCV) -> str:
+        """Prepare CV data for Google Drive storage - Base64 images included"""
+        cv_dict = cv_data.dict()
+
+        # Log storage preparation info
+        photo_info = "No photo"
+        if cv_dict.get("photo", {}).get("photolink"):
+            photolink = cv_dict["photo"]["photolink"]
+            if photolink.startswith("data:image"):
+                size_kb = len(photolink) // 1024
+                photo_info = f"Base64 image (~{size_kb}KB)"
+            elif photolink.startswith("http"):
+                photo_info = f"URL image"
+            else:
+                photo_info = f"Unknown format"
+
+        logger.info(
+            f"📦 Preparing CV for storage: {cv_data.title}, Photo: {photo_info}"
+        )
+
+        storage_data = {
+            "metadata": {
+                "version": "1.0",
+                "created_at": datetime.utcnow().isoformat(),
+                "last_modified": datetime.utcnow().isoformat(),
+                "created_with": "cv-privacy-platform",
+                "provider": "google_drive",
+                "photo_type": "base64"
+                if cv_dict.get("photo", {})
+                .get("photolink", "")
+                .startswith("data:image")
+                else "url"
+                if cv_dict.get("photo", {}).get("photolink", "").startswith("http")
+                else "none",
+            },
+            "cv_data": cv_dict,  # Include the full CV data with Base64 images
+        }
+
+        # Calculate approximate storage size
+        json_str = json.dumps(storage_data, indent=2, default=str)
+        size_mb = len(json_str.encode("utf-8")) / (1024 * 1024)
+        logger.info(f"📦 Storage data size: ~{size_mb:.2f}MB")
+
+        if size_mb > 10:  # Warn if file is getting large
+            logger.warning(f"⚠️ Large file size detected: {size_mb:.2f}MB")
+
+        return json_str
+
+    def _convert_backend_to_frontend_schema(self, cv_data: Dict) -> Dict:
+        """Convert backend schema to frontend schema"""
+        logger.info(
+            f"Converting backend schema to frontend: {cv_data.get('title', 'No title')}"
+        )
+
+        # Handle photo field - backend uses 'photo', frontend expects 'photos' in some contexts
+        photo_data = cv_data.get("photo", cv_data.get("photos", {}))
+        if not isinstance(photo_data, dict):
+            photo_data = {"photolink": None}
+
+        converted = {
+            "title": cv_data.get("title", "My Resume"),
+            "is_public": cv_data.get("is_public", False),
+            "customization": cv_data.get(
+                "customization",
+                {
+                    "template": "stockholm",
+                    "accent_color": "#1a5276",
+                    "font_family": "Helvetica, Arial, sans-serif",
+                    "line_spacing": 1.5,
+                    "headings_uppercase": False,
+                    "hide_skill_level": False,
+                    "language": "en",
+                },
+            ),
+            "personal_info": cv_data.get("personal_info", {}),
+            "educations": cv_data.get("educations", []),
+            "experiences": cv_data.get("experiences", []),
+            "skills": cv_data.get("skills", []),
+            "languages": cv_data.get("languages", []),
+            "referrals": cv_data.get("referrals", []),
+            "custom_sections": cv_data.get("custom_sections", []),
+            "extracurriculars": cv_data.get("extracurriculars", []),
+            "hobbies": cv_data.get("hobbies", []),
+            "courses": cv_data.get("courses", []),
+            "internships": cv_data.get("internships", []),
+            "photo": photo_data,  # Keep consistent with what frontend expects
+        }
+
+        return converted
 
     async def get_connection_status(
         self, token_data: Dict[str, Any]
@@ -127,33 +280,69 @@ class GoogleDriveService:
                 error=str(e),
             )
 
-    # In your google_drive_service.py
-
-    # In google_drive_service.py
     async def save_cv(self, tokens: dict, cv_data: Dict) -> str:
-        """Save CV to Google Drive - handle CompleteCV schema"""
+        """Save CV to Google Drive - DEBUG VERSION with detailed step tracking"""
         try:
-            # Convert to CompleteCV schema for validation
-            complete_cv = CompleteCV(**cv_data)
+            logger.info(
+                f"🐛 SERVICE STEP 1: Starting Google Drive save for CV: {cv_data.get('title', 'Unknown')}"
+            )
 
-            # Prepare for storage
+            # Convert frontend schema to what CompleteCV expects
+            logger.info(f"🐛 SERVICE STEP 2: About to convert frontend schema")
+            converted_data = self._convert_frontend_to_backend_schema(cv_data)
+            logger.info(f"🐛 SERVICE STEP 3: Schema conversion completed")
+
+            # Validate with CompleteCV schema
+            logger.info(f"🐛 SERVICE STEP 4: About to validate with CompleteCV schema")
+            try:
+                complete_cv = CompleteCV(**converted_data)
+                logger.info("🐛 SERVICE STEP 5: CV data validated successfully")
+            except ValidationError as ve:
+                logger.error(f"❌ SERVICE STEP 4 FAILED: CV validation failed: {ve}")
+                # Log the specific validation errors
+                for error in ve.errors():
+                    logger.error(f"   - {error['loc']}: {error['msg']}")
+                raise GoogleDriveError(f"Invalid CV data: {ve}")
+
+            # Prepare for storage (use the validated data)
+            logger.info(f"🐛 SERVICE STEP 6: About to format filename")
             file_name = self._format_cv_filename(complete_cv.title)
+            logger.info(f"🐛 SERVICE STEP 7: Filename created: {file_name}")
+
+            logger.info(f"🐛 SERVICE STEP 8: About to prepare CV for storage")
             content = self._prepare_cv_for_storage(complete_cv)
+            logger.info(
+                f"🐛 SERVICE STEP 9: CV content prepared, length: {len(content)} chars"
+            )
 
             # Upload to Google Drive
+            logger.info(f"🐛 SERVICE STEP 10: About to get access token")
             access_token = tokens["access_token"]
+            logger.info(
+                f"🐛 SERVICE STEP 11: Access token retrieved, length: {len(access_token) if access_token else 0}"
+            )
 
+            logger.info(f"🐛 SERVICE STEP 12: About to create GoogleDriveProvider")
             async with GoogleDriveProvider(access_token) as provider:
+                logger.info(
+                    f"🐛 SERVICE STEP 13: GoogleDriveProvider created, about to upload file"
+                )
                 file_id = await provider.upload_file(file_name, content)
+                logger.info(f"🐛 SERVICE STEP 14: File uploaded successfully")
 
-            logger.info(f"✅ CV saved to Google Drive: {file_id}")
+            logger.info(
+                f"✅ SERVICE STEP 15: CV saved to Google Drive successfully: {file_id}"
+            )
             return file_id
 
         except ValidationError as e:
-            logger.error(f"❌ CV validation failed: {e}")
+            logger.error(f"❌ SERVICE VALIDATION ERROR: CV validation failed: {e}")
             raise GoogleDriveError(f"Invalid CV data: {e}")
         except Exception as e:
-            logger.error(f"❌ Google Drive save failed: {e}")
+            logger.error(f"❌ SERVICE UNEXPECTED ERROR: Google Drive save failed: {e}")
+            import traceback
+
+            logger.error(f"❌ SERVICE TRACEBACK: {traceback.format_exc()}")
             raise GoogleDriveError(f"Failed to save CV: {str(e)}")
 
     def _prepare_cv_for_storage(self, cv_data: CompleteCV) -> str:

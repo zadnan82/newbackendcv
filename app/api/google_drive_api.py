@@ -1,14 +1,23 @@
-# app/api/google_drive_api.py
+# app/api/google_drive_api.py - FIXED to handle frontend schema properly
 """
-Simplified Google Drive API - Focus on getting Google Drive working first
+Simplified Google Drive API - Fixed schema handling and error responses
 """
 
+import asyncio
 import logging
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+
+# Replace this import:
+from datetime import datetime, time
+
+# With this:
+import time
 from datetime import datetime
 import secrets
+import json
+from pydantic import BaseModel, ValidationError
 
 from ..auth.sessions import (
     get_current_session,
@@ -213,12 +222,47 @@ async def test_google_drive_save(session: dict = Depends(get_current_session)):
                 "provider": "google_drive",
             }
 
-        # Create simple test data
-        test_data = CompleteCV(
-            title="Test CV",
-            personal_info={"full_name": "Test User", "email": "test@example.com"},
-            sections={},
-        )
+        # Create simple test data that matches the expected schema
+        test_data = {
+            "title": "Test CV",
+            "is_public": False,
+            "customization": {
+                "template": "stockholm",
+                "accent_color": "#1a5276",
+                "font_family": "Helvetica, Arial, sans-serif",
+                "line_spacing": 1.5,
+                "headings_uppercase": False,
+                "hide_skill_level": False,
+                "language": "en",
+            },
+            "personal_info": {
+                "full_name": "Test User",
+                "email": "test@example.com",
+                "mobile": "+1234567890",
+                "city": "",
+                "address": "",
+                "postal_code": "",
+                "driving_license": "",
+                "nationality": "",
+                "place_of_birth": "",
+                "date_of_birth": "",
+                "linkedin": "",
+                "website": "",
+                "summary": "",
+                "title": "",
+            },
+            "educations": [],
+            "experiences": [],
+            "skills": [],
+            "languages": [],
+            "referrals": [],
+            "custom_sections": [],
+            "extracurriculars": [],
+            "hobbies": [],
+            "courses": [],
+            "internships": [],
+            "photo": {"photolink": None},
+        }
 
         # Save test data
         file_id = await google_drive_service.save_cv(google_drive_tokens, test_data)
@@ -230,28 +274,92 @@ async def test_google_drive_save(session: dict = Depends(get_current_session)):
         return {"success": False, "error": str(e), "provider": "google_drive"}
 
 
+class CVData(BaseModel):
+    title: str
+    is_public: bool = False
+    customization: Dict[str, Any] = {}
+    personal_info: Dict[str, Any] = {}
+    educations: list = []
+    experiences: list = []
+    skills: list = []
+    languages: list = []
+    referrals: list = []
+    custom_sections: list = []
+    extracurriculars: list = []
+    hobbies: list = []
+    courses: list = []
+    internships: list = []
+    photo: Dict[str, Any] = {}
+
+    class Config:
+        extra = "allow"  # Allow additional fields
+
+
 @router.post("/save")
 async def save_cv_to_google_drive(
-    cv_data: CompleteCV,
+    cv_data: dict,  # Simple dict - FastAPI will parse JSON automatically
     session: dict = Depends(get_current_session),
 ):
-    """Save a CV to Google Drive"""
+    """Save a CV to Google Drive - QUICK FIX VERSION"""
+    import time
+
+    start_time = time.time()
+
     try:
+        logger.info("🐛 STEP 1: Starting save_cv_to_google_drive function")
+
         cloud_tokens = session.get("cloud_tokens", {})
         google_drive_tokens = cloud_tokens.get("google_drive")
 
-        if not google_drive_tokens:
-            raise HTTPException(
-                status_code=403,
-                detail="No Google Drive connection found. Please connect your Google Drive account first.",
-            )
+        logger.info(
+            f"🐛 STEP 2: Session data retrieved, has google_drive_tokens: {bool(google_drive_tokens)}"
+        )
 
-        logger.info(f"💾 Saving CV to Google Drive: {cv_data.title}")
+        if not google_drive_tokens:
+            logger.error("❌ No Google Drive connection found")
+            return {
+                "success": False,
+                "error": "No Google Drive connection found. Please connect your Google Drive account first.",
+                "provider": "google_drive",
+            }
+
+        logger.info("🐛 STEP 3: CV data received via FastAPI automatic parsing")
+        logger.info(f"🐛 STEP 4: CV data parsed successfully")
+        logger.info(f"   - Title: {cv_data.get('title', 'No title')}")
+        logger.info(f"   - Has personal_info: {bool(cv_data.get('personal_info'))}")
+        logger.info(
+            f"   - Photo field: {cv_data.get('photo', {}).get('photolink') is not None}"
+        )
+        logger.info(f"   - Data keys: {list(cv_data.keys())}")
+
+        logger.info("🐛 STEP 5: About to validate CV data")
+
+        # Validate that we have minimum required data
+        if not cv_data.get("title"):
+            logger.error("❌ STEP 5 FAILED: No title provided in CV data")
+            return {
+                "success": False,
+                "error": "CV title is required",
+                "provider": "google_drive",
+            }
+
+        logger.info("🐛 STEP 6: About to ensure valid token")
 
         # Ensure token is valid (refresh if needed)
-        valid_tokens = await google_drive_service.ensure_valid_token(
-            google_drive_tokens
-        )
+        try:
+            valid_tokens = await google_drive_service.ensure_valid_token(
+                google_drive_tokens
+            )
+            logger.info("🐛 STEP 7: Token validation successful")
+        except Exception as token_error:
+            logger.error(f"❌ STEP 6 FAILED: Token validation failed: {token_error}")
+            return {
+                "success": False,
+                "error": "Google Drive connection expired. Please reconnect.",
+                "provider": "google_drive",
+            }
+
+        logger.info("🐛 STEP 8: About to update session if needed")
 
         # Update session if tokens were refreshed
         if valid_tokens != google_drive_tokens:
@@ -259,41 +367,135 @@ async def save_cv_to_google_drive(
             await session_manager.update_session_cloud_tokens(
                 session["session_id"], cloud_tokens
             )
+            logger.info("🐛 STEP 9: Session updated with new tokens")
+        else:
+            logger.info("🐛 STEP 9: No session update needed")
+
+        logger.info("🐛 STEP 10: About to call google_drive_service.save_cv")
 
         # Save CV to Google Drive
-        file_id = await google_drive_service.save_cv(valid_tokens, cv_data)
+        try:
+            logger.info(f"💾 Starting Google Drive save for: {cv_data.get('title')}")
 
-        # Record activity
-        await record_session_activity(
-            session["session_id"],
-            "cv_saved",
-            {"provider": "google_drive", "file_id": file_id},
-        )
+            file_id = await google_drive_service.save_cv(valid_tokens, cv_data)
 
-        # IMPORTANT: Return the exact format that frontend expects
-        return {
-            "success": True,
-            "provider": "google_drive",
-            "file_id": file_id,  # This must match frontend expectation
-            "message": f"CV '{cv_data.title}' saved to Google Drive successfully",
-        }
+            processing_time = time.time() - start_time
+            logger.info(
+                f"✅ STEP 11: Google Drive save completed successfully: {file_id} (took {processing_time:.2f}s)"
+            )
 
-    except GoogleDriveError as e:
-        logger.error(f"❌ Google Drive save failed: {str(e)}")
-        # Return proper error format that frontend expects
-        return {
-            "success": False,
-            "error": f"Google Drive error: {str(e)}",
-            "provider": "google_drive",
-        }
+            # Record activity in background
+            try:
+                await record_session_activity(
+                    session["session_id"],
+                    "cv_saved",
+                    {"provider": "google_drive", "file_id": file_id},
+                )
+                logger.info("🐛 STEP 12: Activity recorded successfully")
+            except Exception as activity_error:
+                logger.warning(
+                    f"⚠️ Failed to record activity (non-critical): {activity_error}"
+                )
+
+            # Return success response
+            response_data = {
+                "success": True,
+                "provider": "google_drive",
+                "file_id": file_id,
+                "message": f"CV '{cv_data.get('title')}' saved to Google Drive successfully",
+            }
+            logger.info("🐛 STEP 13: Returning success response")
+            return response_data
+
+        except ValidationError as ve:
+            logger.error(f"❌ STEP 10 FAILED - CV validation error during save: {ve}")
+            validation_details = []
+            for error in ve.errors():
+                validation_details.append(
+                    f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+                )
+
+            return {
+                "success": False,
+                "error": f"CV data validation failed: {'; '.join(validation_details[:3])}{'...' if len(validation_details) > 3 else ''}",
+                "provider": "google_drive",
+            }
+
+        except GoogleDriveError as gd_error:
+            logger.error(f"❌ STEP 10 FAILED - Google Drive service error: {gd_error}")
+            return {
+                "success": False,
+                "error": f"Google Drive error: {str(gd_error)}",
+                "provider": "google_drive",
+            }
+        except Exception as save_error:
+            logger.error(f"❌ STEP 10 FAILED - Unexpected save error: {save_error}")
+            import traceback
+
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return {
+                "success": False,
+                "error": f"Unexpected error during save: {str(save_error)}",
+                "provider": "google_drive",
+            }
+
     except Exception as e:
-        logger.error(f"❌ CV save failed: {str(e)}")
-        # Return proper error format that frontend expects
+        processing_time = time.time() - start_time
+        logger.error(f"❌ OVERALL FAILURE after {processing_time:.2f}s: {str(e)}")
+        import traceback
+
+        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
         return {
             "success": False,
             "error": f"Failed to save CV: {str(e)}",
             "provider": "google_drive",
         }
+
+
+# Add this test endpoint to your google_drive_api.py to verify basic functionality
+
+
+@router.post("/test-save")
+async def test_save_endpoint(
+    request: Request,
+    session: dict = Depends(get_current_session),
+):
+    """Test endpoint to verify request handling is working"""
+    try:
+        logger.info("🧪 TEST: Starting test endpoint")
+
+        # Read body
+        body = await request.body()
+        logger.info(f"🧪 TEST: Body size: {len(body)} bytes")
+
+        # Parse JSON
+        cv_data = json.loads(body.decode("utf-8"))
+        logger.info(f"🧪 TEST: JSON parsed, title: {cv_data.get('title')}")
+
+        # Check session
+        cloud_tokens = session.get("cloud_tokens", {})
+        google_drive_tokens = cloud_tokens.get("google_drive")
+        logger.info(f"🧪 TEST: Has Google Drive tokens: {bool(google_drive_tokens)}")
+
+        return {
+            "success": True,
+            "message": "Test endpoint working",
+            "data_received": {
+                "title": cv_data.get("title"),
+                "has_personal_info": bool(cv_data.get("personal_info")),
+                "sections_count": len(
+                    [k for k in cv_data.keys() if isinstance(cv_data.get(k), list)]
+                ),
+                "body_size": len(body),
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"🧪 TEST FAILED: {str(e)}")
+        import traceback
+
+        logger.error(f"🧪 TEST TRACEBACK: {traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
 
 
 @router.get("/list")
@@ -381,7 +583,7 @@ async def load_cv_from_google_drive(
             {"provider": "google_drive", "file_id": file_id},
         )
 
-        # Convert to response format
+        # Convert to response format - ensure it matches frontend expectations
         response_data = cv_data.dict()
         response_data["id"] = file_id
 

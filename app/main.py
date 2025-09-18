@@ -140,29 +140,6 @@ app.add_middleware(
     max_age=600,
 )
 
-
-# Add debug middleware (add after CORS middleware)
-@app.middleware("http")
-async def debug_requests(request: Request, call_next):
-    """Debug middleware to log requests in development"""
-    if settings.debug:
-        print(f"🔍 {request.method} {request.url}")
-        print(f"🔍 Headers: {dict(request.headers)}")
-
-        # Read body for POST requests
-        if request.method == "POST":
-            body = await request.body()
-            if body:
-                print(f"🔍 Body: {body.decode()}")
-
-    response = await call_next(request)
-
-    if settings.debug:
-        print(f"🔍 Response: {response.status_code}")
-
-    return response
-
-
 # Trusted hosts middleware (production security)
 if not settings.debug:
     app.add_middleware(

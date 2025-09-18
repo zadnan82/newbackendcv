@@ -15,6 +15,13 @@ from enum import Enum
 
 
 # Core CV Component Schemas (PRESERVED EXACTLY)
+# Update PersonalInfoBase in your schemas.py to handle empty strings
+
+from pydantic import field_validator
+from datetime import date
+from typing import Optional
+
+
 class PersonalInfoBase(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=100)
     title: Optional[str] = Field(None, max_length=100)
@@ -31,6 +38,35 @@ class PersonalInfoBase(BaseModel):
     website: Optional[str] = Field(None, max_length=200)
     summary: Optional[str] = Field(None, max_length=2000)
 
+    @field_validator("date_of_birth", mode="before")
+    def parse_date_of_birth(cls, v):
+        """Convert empty strings to None for date_of_birth"""
+        if v == "" or v is None:
+            return None
+        return v
+
+    @field_validator(
+        "title",
+        "city",
+        "address",
+        "postal_code",
+        "driving_license",
+        "nationality",
+        "place_of_birth",
+        "linkedin",
+        "website",
+        "summary",
+        mode="before",
+    )
+    def empty_string_to_none(cls, v):
+        """Convert empty strings to None for optional fields"""
+        if v == "":
+            return None
+        return v
+
+
+# Also add similar validation to EducationBase and ExperienceBase for date fields:
+
 
 class EducationBase(BaseModel):
     institution: str = Field(..., min_length=1, max_length=100)
@@ -42,6 +78,20 @@ class EducationBase(BaseModel):
     current: Optional[bool] = False
     gpa: Optional[str] = Field(None, max_length=10)
 
+    @field_validator("start_date", "end_date", mode="before")
+    def parse_dates(cls, v):
+        """Convert empty strings to None for dates"""
+        if v == "" or v is None:
+            return None
+        return v
+
+    @field_validator("location", "gpa", mode="before")
+    def empty_string_to_none(cls, v):
+        """Convert empty strings to None for optional fields"""
+        if v == "":
+            return None
+        return v
+
 
 class ExperienceBase(BaseModel):
     company: str = Field(..., min_length=1, max_length=100)
@@ -51,6 +101,20 @@ class ExperienceBase(BaseModel):
     end_date: Optional[date] = None
     current: Optional[bool] = False
     description: Optional[str] = Field(None, max_length=2000)
+
+    @field_validator("start_date", "end_date", mode="before")
+    def parse_dates(cls, v):
+        """Convert empty strings to None for dates"""
+        if v == "" or v is None:
+            return None
+        return v
+
+    @field_validator("location", "description", mode="before")
+    def empty_string_to_none(cls, v):
+        """Convert empty strings to None for optional fields"""
+        if v == "":
+            return None
+        return v
 
 
 class SkillBase(BaseModel):
@@ -100,8 +164,46 @@ class InternshipBase(BaseModel):
     description: Optional[str] = Field(None, max_length=2000)
 
 
+# Update PhotoBase to handle Base64 images
 class PhotoBase(BaseModel):
-    photolink: Optional[str] = Field(None)
+    photolink: Optional[str] = Field(None)  # Can be None, URL, or Base64
+
+    @field_validator("photolink")
+    def validate_photo_link(cls, v):
+        if v is None or v == "":
+            return None
+
+        # Allow Base64 images
+        if v.startswith("data:image/"):
+            # Basic Base64 validation
+            if not re.match(r"^data:image/(jpeg|jpg|png|gif|webp);base64,", v):
+                raise ValueError("Invalid Base64 image format")
+
+            # Check if the Base64 part exists
+            try:
+                base64_part = v.split(",")[1]
+                if len(base64_part) < 100:  # Minimum reasonable size
+                    raise ValueError("Base64 image data too small")
+
+                # Optional: Check size limit (e.g., 2MB when decoded)
+                # Rough estimate: Base64 is ~33% larger than binary
+                estimated_size = len(base64_part) * 0.75
+                if estimated_size > 2 * 1024 * 1024:  # 2MB limit
+                    raise ValueError("Image too large (max 2MB)")
+
+            except (IndexError, ValueError):
+                raise ValueError("Invalid Base64 image data")
+
+            return v
+
+        # Allow regular URLs (for backwards compatibility)
+        if v.startswith(("http://", "https://")):
+            if len(v) > 500:  # Reasonable URL length limit
+                raise ValueError("Photo URL too long")
+            return v
+
+        # If it's neither Base64 nor URL, it's invalid
+        raise ValueError("Photo must be a valid Base64 image or URL")
 
 
 class CustomizationBase(BaseModel):

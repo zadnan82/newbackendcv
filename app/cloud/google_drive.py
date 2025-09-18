@@ -187,10 +187,12 @@ class GoogleDriveProvider:
     async def upload_file(
         self, file_name: str, content: str, folder_name: str = "CVs"
     ) -> str:
-        """Upload CV file to Google Drive"""
+        """Upload CV file to Google Drive - DEBUG VERSION"""
         try:
+            logger.info(f"🐛 PROVIDER STEP 1: Starting upload for file: {file_name}")
+
             folder_id = await self._get_or_create_folder(folder_name)
-            logger.info(f"📤 Uploading file: {file_name} to folder: {folder_id}")
+            logger.info(f"🐛 PROVIDER STEP 2: Folder ID retrieved: {folder_id}")
 
             # Create file metadata
             metadata = {
@@ -198,14 +200,17 @@ class GoogleDriveProvider:
                 "parents": [folder_id],
                 "mimeType": "application/json",
             }
+            logger.info(f"🐛 PROVIDER STEP 3: Metadata created")
 
             # Use multipart upload
             upload_url = (
                 "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
             )
+            logger.info(f"🐛 PROVIDER STEP 4: Upload URL set")
 
             # Prepare multipart data
             boundary = "==boundary=="
+            logger.info(f"🐛 PROVIDER STEP 5: About to build multipart body")
 
             # Build multipart body
             body_parts = []
@@ -224,28 +229,46 @@ class GoogleDriveProvider:
             body_parts.append(f"--{boundary}--")
 
             body = "\r\n".join(body_parts)
+            logger.info(
+                f"🐛 PROVIDER STEP 6: Multipart body created, size: {len(body)} chars"
+            )
 
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
                 "Content-Type": f"multipart/related; boundary={boundary}",
                 "Content-Length": str(len(body.encode("utf-8"))),
             }
+            logger.info(f"🐛 PROVIDER STEP 7: Headers prepared")
 
+            logger.info(
+                f"🐛 PROVIDER STEP 8: About to make HTTP request to Google Drive"
+            )
             async with self.session.post(
                 upload_url, headers=headers, data=body.encode("utf-8")
             ) as response:
+                logger.info(
+                    f"🐛 PROVIDER STEP 9: HTTP request completed, status: {response.status}"
+                )
+
                 if response.status >= 400:
                     error_text = await response.text()
-                    logger.error(f"❌ Upload failed: {error_text}")
+                    logger.error(
+                        f"❌ PROVIDER STEP 9 FAILED: Upload failed: {error_text}"
+                    )
                     raise GoogleDriveError(f"Upload failed: {error_text}")
 
                 result = await response.json()
                 file_id = result["id"]
-                logger.info(f"✅ File uploaded successfully: {file_id}")
+                logger.info(
+                    f"✅ PROVIDER STEP 10: File uploaded successfully: {file_id}"
+                )
                 return file_id
 
         except Exception as e:
-            logger.error(f"❌ File upload failed: {e}")
+            logger.error(f"❌ PROVIDER ERROR: File upload failed: {e}")
+            import traceback
+
+            logger.error(f"❌ PROVIDER TRACEBACK: {traceback.format_exc()}")
             raise GoogleDriveError(f"Failed to upload file: {e}")
 
     async def download_file(self, file_id: str) -> str:

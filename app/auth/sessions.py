@@ -4,6 +4,7 @@ Anonymous session management for privacy-first CV platform
 FIXED: Minor improvements for better error handling
 """
 
+import asyncio
 import hashlib
 import secrets
 from datetime import datetime, timedelta
@@ -140,13 +141,16 @@ class SessionManager:
         db = next(get_db())
 
         try:
-            session = (
-                db.query(AnonymousSession)
-                .filter(
-                    AnonymousSession.session_id == session_id,
-                    AnonymousSession.expires_at > datetime.utcnow(),
-                )
-                .first()
+            session = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: db.query(AnonymousSession)
+                    .filter(
+                        AnonymousSession.session_id == session_id,
+                        AnonymousSession.expires_at > datetime.utcnow(),
+                    )
+                    .first()
+                ),
+                timeout=5.0,  # 5 second timeout
             )
 
             if not session:
