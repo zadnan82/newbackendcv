@@ -345,6 +345,34 @@ class GoogleDriveService:
             logger.error(f"❌ SERVICE TRACEBACK: {traceback.format_exc()}")
             raise GoogleDriveError(f"Failed to save CV: {str(e)}")
 
+    async def update_cv(self, tokens: dict, file_id: str, cv_data: Dict) -> bool:
+        """Update an existing CV in Google Drive"""
+        try:
+            logger.info(f"🔄 Updating CV in Google Drive: {file_id}")
+
+            # Convert and validate data (same as save)
+            converted_data = self._convert_frontend_to_backend_schema(cv_data)
+            complete_cv = CompleteCV(**converted_data)
+
+            # Prepare content for storage
+            content = self._prepare_cv_for_storage(complete_cv)
+
+            access_token = tokens["access_token"]
+
+            async with GoogleDriveProvider(access_token) as provider:
+                success = await provider.update_file(file_id, content)
+
+            if success:
+                logger.info(f"✅ CV updated successfully: {file_id}")
+            else:
+                logger.error(f"❌ Failed to update CV: {file_id}")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"❌ CV update failed: {e}")
+            raise GoogleDriveError(f"Failed to update CV: {str(e)}")
+
     def _prepare_cv_for_storage(self, cv_data: CompleteCV) -> str:
         """Prepare CV data for Google Drive storage"""
         storage_data = {

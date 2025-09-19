@@ -810,3 +810,68 @@ async def debug_download_file(
     except Exception as e:
         logger.error(f"Debug download failed: {str(e)}")
         return {"error": str(e)}
+
+
+@router.put("/update-file/{file_id}")
+async def update_cv_in_google_drive(
+    file_id: str,
+    cv_data: dict,
+    session: dict = Depends(get_current_session),
+):
+    """Update an existing CV in Google Drive"""
+    try:
+        logger.info(f"🔄 Updating CV in Google Drive: {file_id}")
+
+        cloud_tokens = session.get("cloud_tokens", {})
+        google_drive_tokens = cloud_tokens.get("google_drive")
+
+        if not google_drive_tokens:
+            return {
+                "success": False,
+                "error": "No Google Drive connection found",
+                "provider": "google_drive",
+            }
+
+        # Ensure token is valid
+        valid_tokens = await google_drive_service.ensure_valid_token(
+            google_drive_tokens
+        )
+
+        # Update session if tokens were refreshed
+        if valid_tokens != google_drive_tokens:
+            cloud_tokens["google_drive"] = valid_tokens
+            await session_manager.update_session_cloud_tokens(
+                session["session_id"], cloud_tokens
+            )
+
+        # Update CV in Google Drive
+        success = await google_drive_service.update_cv(valid_tokens, file_id, cv_data)
+
+        if success:
+            # Record activity
+            await record_session_activity(
+                session["session_id"],
+                "cv_updated",
+                {"provider": "google_drive", "file_id": file_id},
+            )
+
+            return {
+                "success": True,
+                "file_id": file_id,
+                "message": f"CV updated successfully",
+                "provider": "google_drive",
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to update CV",
+                "provider": "google_drive",
+            }
+
+    except Exception as e:
+        logger.error(f"❌ Update CV failed: {str(e)}")
+        return {
+            "success": False,
+            "error": f"Failed to update CV: {str(e)}",
+            "provider": "google_drive",
+        }

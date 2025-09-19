@@ -319,6 +319,81 @@ class GoogleDriveProvider:
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
             raise GoogleDriveError(f"Failed to download file: {e}")
 
+    async def update_file(self, file_id: str, content: str) -> bool:
+        """Update an existing file in Google Drive"""
+        try:
+            logger.info(f"📝 Updating file in Google Drive: {file_id}")
+
+            # Use the upload endpoint with the file ID to update
+            upload_url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media"
+
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+            }
+
+            async with self.session.patch(
+                upload_url, headers=headers, data=content.encode("utf-8")
+            ) as response:
+                logger.info(f"📊 Update response status: {response.status}")
+
+                if response.status >= 400:
+                    error_text = await response.text()
+                    logger.error(f"❌ Update failed: {error_text}")
+                    return False
+
+                logger.info(f"✅ File updated successfully: {file_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"❌ File update failed: {e}")
+            return False
+
+    async def delete_file(self, file_id: str) -> bool:
+        """Delete a file from Google Drive"""
+        try:
+            logger.info(f"🗑️ Deleting file from Google Drive: {file_id}")
+
+            url = f"{self.api_base}/files/{file_id}"
+
+            await self._make_request("DELETE", url)
+
+            logger.info(f"✅ File deleted successfully: {file_id}")
+            return True
+
+        except GoogleDriveError as e:
+            logger.error(f"❌ Failed to delete file {file_id}: {e}")
+            if "404" in str(e):
+                # File already doesn't exist, consider it a success
+                logger.info(f"📝 File {file_id} was already deleted or doesn't exist")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error deleting file {file_id}: {e}")
+            return False
+
+    async def get_storage_quota(self) -> Optional[Dict[str, int]]:
+        """Get Google Drive storage quota information"""
+        try:
+            url = f"{self.api_base}/about"
+            params = {"fields": "storageQuota"}
+
+            result = await self._make_request("GET", url, params=params)
+
+            storage_quota = result.get("storageQuota", {})
+            if storage_quota:
+                return {
+                    "total": int(storage_quota.get("limit", 0)),
+                    "used": int(storage_quota.get("usage", 0)),
+                    "available": int(storage_quota.get("limit", 0))
+                    - int(storage_quota.get("usage", 0)),
+                }
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to get storage quota: {e}")
+            return None
+
 
 # Make sure this method is properly indented inside the GoogleDriveProvider class
 
